@@ -61,10 +61,13 @@
 # and how to read a completed result. Ownership, durable capture, publication,
 # and restart recovery all belong to bin/fm-procevent.sh.
 #
-# `arm` snapshots each non-empty, non-secret LAVISH_AXI connection setting into
-# the registered argv through `env`. A replacement runner therefore reconnects
-# to the same server even when its own environment is clean. Empty settings are
-# deliberately omitted so they cannot override a runner-side default.
+# `arm` snapshots the effective non-secret connection settings - LAVISH_AXI_HOST,
+# LAVISH_AXI_LINK_HOST, LAVISH_AXI_ALLOWED_HOSTS, LAVISH_AXI_PORT, and
+# LAVISH_AXI_STATE_DIR - into the registered argv through `env`. A replacement
+# runner therefore reconnects to the same server even when its own environment
+# is clean. Only those five are recorded, so no credential ever enters argv, and
+# an empty setting is deliberately omitted so it cannot override a runner-side
+# default.
 #
 # `answers` is this adapter's half of the generic keyed-answer contract in
 # bin/fm-procevent.sh. It reports what the captain actually chose, as
