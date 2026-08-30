@@ -61,6 +61,11 @@
 # and how to read a completed result. Ownership, durable capture, publication,
 # and restart recovery all belong to bin/fm-procevent.sh.
 #
+# `arm` snapshots each non-empty, non-secret LAVISH_AXI connection setting into
+# the registered argv through `env`. A replacement runner therefore reconnects
+# to the same server even when its own environment is clean. Empty settings are
+# deliberately omitted so they cannot override a runner-side default.
+#
 # `answers` is this adapter's half of the generic keyed-answer contract in
 # bin/fm-procevent.sh. It reports what the captain actually chose, as
 # `<task-id>\t<answer>\t<label>` lines, and stops there. It maps nothing to a
@@ -139,7 +144,8 @@ cmd_source_id() {
 }
 
 cmd_arm() {
-  local artifact=${1-} id real
+  local artifact=${1-} id real name value
+  local -a poll_argv=(env)
   [ -n "$artifact" ] || usage
   [ "$#" -eq 1 ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
@@ -151,8 +157,14 @@ cmd_arm() {
   # no --timeout-ms so completion is a server event, and absorbs only the exact
   # transient interruption. Registering raw poll output is what let that
   # interruption reach the runner as a captured result.
+  for name in LAVISH_AXI_HOST LAVISH_AXI_LINK_HOST LAVISH_AXI_ALLOWED_HOSTS \
+    LAVISH_AXI_PORT LAVISH_AXI_STATE_DIR; do
+    value=${!name-}
+    [ -n "$value" ] && poll_argv+=("$name=$value")
+  done
+  poll_argv+=("$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real")
   "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" \
-    -- "$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real" || exit 1
+    -- "${poll_argv[@]}" || exit 1
   printf 'armed: %s\n' "$id"
   printf 'artifact: %s\n' "$real"
 }

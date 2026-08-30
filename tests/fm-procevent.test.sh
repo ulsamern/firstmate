@@ -545,6 +545,70 @@ assert_absent "$FM_PROCEVENT_CLAIM_ROOT/retire-fail-src.claim" \
   || fail "retirement recovery reran the terminal source"
 pass "failed terminal retirement is fail-closed and idempotently recoverable"
 
+# --- Lavish connection settings survive a clean runner environment -----------
+# A Lavish poll selects its server from LAVISH_AXI_* settings. The adapter must
+# register those effective non-secret settings as argv, because a later runner
+# starts from the watcher's environment instead of the shell that armed it.
+HLAVISHENV="$TMP_ROOT/hlavishenv"; new_home "$HLAVISHENV"
+LAVISH_ENV_BIN=$(fm_fakebin "$TMP_ROOT/lavish-env-stub")
+LAVISH_ENV_CAPTURE="$TMP_ROOT/lavish-child-environment"
+cat > "$LAVISH_ENV_BIN/lavish-axi" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' \
+  "LAVISH_AXI_HOST=\${LAVISH_AXI_HOST-}" \
+  "LAVISH_AXI_LINK_HOST=\${LAVISH_AXI_LINK_HOST-}" \
+  "LAVISH_AXI_ALLOWED_HOSTS=\${LAVISH_AXI_ALLOWED_HOSTS-}" \
+  "LAVISH_AXI_PORT=\${LAVISH_AXI_PORT-}" \
+  "LAVISH_AXI_STATE_DIR=\${LAVISH_AXI_STATE_DIR-}" > "$LAVISH_ENV_CAPTURE"
+printf 'session:\\n  file: /review.html\\n  status: ended\\n  ended_by: user\\n'
+SH
+chmod +x "$LAVISH_ENV_BIN/lavish-axi"
+LAVISH_ENV_ART="$TMP_ROOT/lavish-environment.html"
+printf '<h1>environment</h1>\n' > "$LAVISH_ENV_ART"
+lavish_env_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LAVISH_ENV_ART")
+PE_TRACKED+=("$HLAVISHENV|$lavish_env_id")
+PATH="$LAVISH_ENV_BIN:$PATH" FM_HOME="$HLAVISHENV" \
+  LAVISH_AXI_HOST=100.125.212.81 \
+  LAVISH_AXI_LINK_HOST=100.125.212.81 \
+  LAVISH_AXI_ALLOWED_HOSTS='matterhorn.tailnet.example matterhorn' \
+  LAVISH_AXI_PORT=4391 \
+  LAVISH_AXI_STATE_DIR="$TMP_ROOT/lavish-state" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LAVISH_ENV_ART" >/dev/null
+env -i PATH="$LAVISH_ENV_BIN:$PATH" FM_HOME="$HLAVISHENV" \
+  FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+  "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null
+wait_for "$LAVISH_ENV_CAPTURE" || fail "a clean-environment runner did not execute the Lavish poll"
+assert_contains "$(cat "$LAVISH_ENV_CAPTURE")" "LAVISH_AXI_HOST=100.125.212.81" \
+  "the replacement poll lost its armed Lavish host"
+assert_contains "$(cat "$LAVISH_ENV_CAPTURE")" "LAVISH_AXI_LINK_HOST=100.125.212.81" \
+  "the replacement poll lost its armed Lavish link host"
+assert_contains "$(cat "$LAVISH_ENV_CAPTURE")" "LAVISH_AXI_ALLOWED_HOSTS=matterhorn.tailnet.example matterhorn" \
+  "the replacement poll lost its armed Lavish allowed-host list"
+assert_contains "$(cat "$LAVISH_ENV_CAPTURE")" "LAVISH_AXI_PORT=4391" \
+  "the replacement poll lost its armed Lavish port"
+assert_contains "$(cat "$LAVISH_ENV_CAPTURE")" "LAVISH_AXI_STATE_DIR=$TMP_ROOT/lavish-state" \
+  "the replacement poll lost its armed Lavish state directory"
+pass "an armed Lavish poll keeps its connection settings after a clean-environment reconcile"
+
+# An empty value is not an effective connection setting. It must be omitted
+# from the stored `env` argv so a future runner can retain its own default.
+HLAVISHEMPTY="$TMP_ROOT/hlavishempty"; new_home "$HLAVISHEMPTY"
+LAVISH_EMPTY_ART="$TMP_ROOT/lavish-empty-environment.html"
+printf '<h1>empty environment</h1>\n' > "$LAVISH_EMPTY_ART"
+lavish_empty_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$LAVISH_EMPTY_ART")
+PE_TRACKED+=("$HLAVISHEMPTY|$lavish_empty_id")
+PATH="$LAVISH_ENV_BIN:$PATH" FM_HOME="$HLAVISHEMPTY" LAVISH_AXI_HOST= \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$LAVISH_EMPTY_ART" >/dev/null
+rm -f "$LAVISH_ENV_CAPTURE"
+env -i PATH="$LAVISH_ENV_BIN:$PATH" FM_HOME="$HLAVISHEMPTY" \
+  FM_PROCEVENT_CLAIM_ROOT="$FM_PROCEVENT_CLAIM_ROOT" \
+  LAVISH_AXI_HOST=runner-default \
+  "$ROOT/bin/fm-procevent.sh" reconcile >/dev/null
+wait_for "$LAVISH_ENV_CAPTURE" || fail "an empty armed host did not run the replacement poll"
+assert_contains "$(cat "$LAVISH_ENV_CAPTURE")" "LAVISH_AXI_HOST=runner-default" \
+  "an empty armed host overrode the runner-side default"
+pass "an empty Lavish connection setting is not recorded into the poll argv"
+
 # --- end-user-aligned regression: one Send & End, one captured result -------
 # The dogfood defect: a real armed Lavish source received one human `Send & End`
 # action, and the runner captured four results - the human's real feedback, then
