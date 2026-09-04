@@ -880,6 +880,75 @@ SH
   pass "a direct answer replays any record of the gate a closed row settled"
 }
 
+# The same escape hatch on a gate whose answer RELEASED the work: the row is
+# then neither held nor closed, and its settled gate can still carry several
+# records, so replaying any of them is that gate's own release replayed.
+test_direct_answer_replays_a_non_newest_record_of_a_released_gate() {
+  local home decision out rc records show
+  home=$(make_home keyed-direct-released-replay)
+  decision="$home/older-release.txt"
+  tasks_in "$home" add sample-released-pair "Ship the released sample pair" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the direct released-replay fixture"
+  run_captain "$home" hold sample-released-pair --reason "captain go needed" >/dev/null \
+    || fail "could not hold the direct released-replay fixture"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  done|unhold)
+    if [ "${2:-}" = "${TASKS_AXI_FAIL_CLOSE_ID:-}" ]; then
+      printf 'error: backlog write interrupted\n' >&2
+      exit 70
+    fi
+    ;;
+esac
+exec "${REAL_TASKS_AXI:?}" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  # The first delivery derives its release from the In flight state, then its
+  # unhold is interrupted, leaving the record on a gate that is still open.
+  set +e
+  printf 'sample-released-pair\tgo\tShip the released sample pair\n' \
+    | PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+      TASKS_AXI_FAIL_CLOSE_ID=sample-released-pair FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" answers \
+      --source "chat channel fixture" >/dev/null 2>&1
+  set -e
+  rm -f "$home/fakebin/tasks-axi"
+  # The same words through another channel digest differently, so they land a
+  # second record on that same gate and this time the release settles it.
+  printf 'sample-released-pair\tgo\tShip the released sample pair\n' \
+    | run_captain "$home" answers --source "board card fixture" >/dev/null \
+    || fail "the second delivery did not settle the released gate"
+  show=$(tasks_in "$home" show sample-released-pair --full)
+  assert_contains "$show" "state: in_flight" "the settling release completed the gated work"
+  assert_contains "$show" "held: no" "the settling release did not lift the gate"
+  records=$(printf '%s' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 2 ] || fail "the fixture did not leave two records on one released gate ($records)"
+  # The older record sits at the bottom of the body, so the decision text after
+  # the LAST `Captain decision:` line is the chat delivery's own.
+  printf '%s' "$show" | sed -n 's/^  body: //p' | jq -r . \
+    | awk '/^Captain decision:$/ { start = NR } { line[NR] = $0 }
+           END { for (i = start + 1; i <= NR; i++) print line[i] }' > "$decision"
+  grep -Fq 'chat channel fixture' "$decision" \
+    || fail "the fixture did not recover the older delivery's own decision text"
+
+  set +e
+  out=$(run_captain "$home" answer sample-released-pair --decision-file "$decision" --release 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "the direct replay of a released gate's older record was refused: $out"
+  assert_contains "$out" "released: sample-released-pair" \
+    "the direct replay of a released gate's own answer was not reported as released"
+  show=$(tasks_in "$home" show sample-released-pair --full)
+  assert_contains "$show" "state: in_flight" "the direct replay closed released work"
+  records=$(printf '%s' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 2 ] || fail "the direct replay changed the durable record ($records)"
+  pass "a direct answer replays any record of the gate a released row settled"
+}
+
 # The stamp says which gate this script last placed, never whether its close
 # landed. Once an occurrence has settled, a gate re-placed with `tasks-axi hold`
 # directly is a NEW one, so the previous gate's answer is a stale echo that must
@@ -2435,6 +2504,7 @@ test_two_records_on_one_gate_stay_retryable
 test_unstamped_multi_record_gate_stays_retryable
 test_replay_of_a_non_newest_record_on_a_settled_gate_is_idempotent
 test_direct_answer_replays_a_non_newest_record_of_a_settled_gate
+test_direct_answer_replays_a_non_newest_record_of_a_released_gate
 test_direct_regate_after_a_settled_close_refuses_the_stale_echo
 test_modeless_record_retry_falls_through_to_the_state_default
 test_stale_reply_after_rehold_leaves_the_new_gate_intact

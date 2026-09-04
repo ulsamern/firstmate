@@ -895,15 +895,22 @@ command_answer() {
   fi
 
   # Not held and not closed: only an already-recorded release replays cleanly.
+  # The released gate can carry more than one record, and any of them replays
+  # it under its own mode - the rule every other replay path applies - while a
+  # record naming an earlier gate is drift.
   if body_has_resolution_record "$body"; then
     recorded_mode=$(recorded_resolution_mode "$body" || true)
-    [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
-      || fail "task $id records a different captain decision with mode ${recorded_mode:-unknown}"
-    [ "$recorded_mode" = released ] && [ "$release" = 1 ] \
-      || fail "task $id records this answer with mode ${recorded_mode:-unknown}; replay requires matching --release"
     gate=$(hold_occurrence_stamp "$id")
     [ -n "$gate" ] || gate=$(newest_record_occurrence "$body")
     [ -n "$gate" ] || gate=$((occurrence - 1))
+    matched=$(recorded_digest_occurrence "$body" "$DECISION_DIGEST")
+    matched_occurrence=${matched%% *}
+    matched_mode=''
+    case "$matched" in *' '*) matched_mode=${matched#* } ;; esac
+    { [ -n "$matched" ] && [ "$matched_occurrence" = "$gate" ]; } \
+      || fail "task $id records a different captain decision with mode ${recorded_mode:-unknown}"
+    [ "$matched_mode" = released ] && [ "$release" = 1 ] \
+      || fail "task $id records this answer with mode ${matched_mode:-unknown}; replay requires matching --release"
     publish_parent_hold "$id" "$gate" resolved released
     printf 'released: %s\n' "$id"
     return 0
