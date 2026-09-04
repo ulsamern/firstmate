@@ -754,6 +754,7 @@ test_exclude_family() {
 
 test_portable_shard_union_and_coverage_guard() {
   local s1 s2 proven serial herdr all_count union_count overlap out first
+  local probe locale_name
   s1=$("$RUNNER" --list --lane portable-parallel-1)
   s2=$("$RUNNER" --list --lane portable-parallel-2)
   proven=$("$RUNNER" --list --proven-isolated)
@@ -774,6 +775,21 @@ test_portable_shard_union_and_coverage_guard() {
     || fail "herdr family must include smoke"
   out=$("$RUNNER" --check-coverage)
   assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker"
+  # The guard sorts its lane files in the C collation, so it has to compare
+  # them in that collation too. Under a locale that weighs punctuation after
+  # letters, `tests/fm-backend.test.sh` collates after its
+  # `tests/fm-backend-tmux-smoke.test.sh` sibling, and a locale-default `comm`
+  # rejects the guard's own sorted input - a green suite failing for the
+  # caller's locale alone. Prove it under such a locale when one exists here.
+  probe=$'tests/fm-backend-tmux-smoke.test.sh\ntests/fm-backend.test.sh'
+  for locale_name in $(locale -a 2>/dev/null | grep -iE '\.utf-?8$' || true); do
+    [ "$(printf '%s\n' "$probe" | LC_ALL="$locale_name" sort | head -n 1)" \
+      = "tests/fm-backend.test.sh" ] || continue
+    out=$(LC_ALL="$locale_name" "$RUNNER" --check-coverage 2>&1) \
+      || fail "coverage guard failed under $locale_name: $out"
+    assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard marker under $locale_name"
+    break
+  done
   all_count=$("$RUNNER" --list --all | wc -l | tr -d ' ')
   union_count=$(printf '%s\n' "$s1" "$s2" "$serial" "$herdr" | LC_ALL=C sort -u | wc -l | tr -d ' ')
   [ "$union_count" = "$all_count" ] \
