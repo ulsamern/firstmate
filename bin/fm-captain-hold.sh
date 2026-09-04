@@ -75,11 +75,13 @@
 # else is skipped. A key that names no task, a task that is not held for the
 # captain, or a task already closed is reported as `skipped:` and feeds
 # nothing. A replayed delivery whose answer digest and requested close mode
-# both match the newest record is reported `closed:` and is a no-op; a mode
-# mismatch is skipped. The command exits nonzero when any key was skipped.
-# `--source` is provenance text recorded in the durable decision, never a
-# behavior switch: this command has no per-channel branch and no knowledge of
-# chat, review decks, or any transport.
+# both match the newest record is reported `closed:` and is a no-op, unless
+# the row has since been re-held for a later gate: that stale duplicate is
+# skipped rather than spent on the new gate, which keeps its hold and needs
+# decision text of its own. A mode mismatch is skipped. The command exits
+# nonzero when any key was skipped. `--source` is provenance text recorded in
+# the durable decision, never a behavior switch: this command has no
+# per-channel branch and no knowledge of chat, review decks, or any transport.
 # Legacy input: an optional positional origin (or a stored concrete-origin
 # binding) makes a key that names no task fall back to the old
 # `<origin>-decision-<key>` identity, so an in-flight pre-collapse channel
