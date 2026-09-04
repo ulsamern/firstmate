@@ -371,6 +371,46 @@ test_release_frees_held_work() {
   pass "release frees held work with the captain's words recorded and the body preserved"
 }
 
+# A channel normally sends three fields, so the keyed-answer intake itself must
+# choose release for work that was already in flight and close a decision-only
+# card that was never started.
+test_default_keyed_answer_releases_in_flight_work() {
+  local home show out
+  home=$(make_home keyed-default-release)
+  tasks_in "$home" add sample-in-flight-work "Ship the in-flight sample work" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the in-flight work fixture"
+  run_captain "$home" hold sample-in-flight-work --reason "captain go needed before shipping" >/dev/null \
+    || fail "could not hold the in-flight work item"
+  out=$(printf 'sample-in-flight-work\tgo ahead\tShip the in-flight sample work\n' \
+    | run_captain "$home" answers --source "three-field channel fixture") \
+    || fail "the three-field keyed answer was not accepted"
+  assert_contains "$out" "closed: sample-in-flight-work" \
+    "the three-field keyed answer did not report its resolution"
+  show=$(tasks_in "$home" show sample-in-flight-work --full)
+  assert_contains "$show" "state: in_flight" \
+    "a default keyed answer completed in-flight work instead of releasing it"
+  assert_contains "$show" "held: no" \
+    "a default keyed answer did not lift the in-flight work hold"
+  assert_contains "$show" "Resolution mode: released" \
+    "a default keyed answer did not record the release mode"
+  assert_contains "$show" "Answer: go ahead" \
+    "a default keyed answer did not retain the captain's words"
+
+  run_captain "$home" hold sample-decision-card --title "Choose the sample direction" \
+    --reason "captain choice pending" --repo sample >/dev/null \
+    || fail "could not create the decision-card fixture"
+  printf 'sample-decision-card\tchoose north\tChoose the sample direction\n' \
+    | run_captain "$home" answers --source "three-field channel fixture" >/dev/null \
+    || fail "the three-field decision-card answer was not accepted"
+  show=$(tasks_in "$home" show sample-decision-card --full)
+  assert_contains "$show" "state: done" \
+    "a default keyed answer did not complete a decision-only card"
+  assert_contains "$show" "Resolution mode: answered" \
+    "a decision-only card did not record its completion mode"
+  pass "default keyed answers release in-flight work and complete decision-only cards"
+}
+
 # Deferral is a date, not a live card: hold --until keeps the task out of
 # captain_actionable until due, tasks-axi's own date-gate expiry keeps the task
 # answerable, and Bearings renders the wait as a dated gate.
@@ -1527,6 +1567,7 @@ test_uninventoried_report_decision_refuses_completion
 test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
+test_default_keyed_answer_releases_in_flight_work
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner

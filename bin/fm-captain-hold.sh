@@ -58,14 +58,15 @@
 # `held:` bit, prove the captain owned it.
 #
 # ONE KEYED-ANSWER INTAKE, FED BY EVERY CHANNEL.
-# "A keyed answer closes its matching captain-held task" is a single
+# "A keyed answer resolves its matching captain-held task" is a single
 # capability, owned here and nowhere else. `answers` reads
-# `<task-id>\t<answer>\t<label>[\t<mode>]` lines on stdin and closes each named
+# `<task-id>\t<answer>\t<label>[\t<mode>]` lines on stdin and resolves each named
 # task through the very same `answer` path above, so every guard applies
 # identically no matter which channel the answer arrived on. The key IS the
 # task id - no identity arithmetic. The optional fourth field selects the close:
-# empty or `done` completes the task, `release` lifts the hold so held work
-# resumes; anything else is skipped. A key that names no task, a task that is
+# `done` completes the task, `release` lifts the hold so held work resumes, and
+# an absent or empty mode releases a task currently In flight while completing
+# a decision-only card; anything else is skipped. A key that names no task, a task that is
 # not held for the captain, or a task already closed is reported as `skipped:`
 # and feeds nothing. A replayed delivery whose answer digest and requested
 # close mode both match the newest record is reported `closed:` and is a no-op;
@@ -786,8 +787,9 @@ command_answers() {
     label=$(sanitize_field "${label:-}")
     release_flag=''
     case "${mode:-}" in
-      ''|done) : ;;
+      done) : ;;
       release) release_flag=--release ;;
+      '') : ;;
       *)
         printf 'skipped: %s (unknown close mode %s)\n' "$key" "$(sanitize_field "$mode")"
         skipped=$((skipped + 1))
@@ -818,6 +820,9 @@ command_answers() {
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)
     body=$(show_field "$show" body)
+    if [ -z "$release_flag" ] && [ -z "${mode:-}" ] && [ "$state" = in_flight ]; then
+      release_flag=--release
+    fi
     recorded_digest=$(recorded_decision_digest "$body" || true)
     recorded_mode=$(recorded_resolution_mode "$body" || true)
     if body_has_resolution_record "$body" \
