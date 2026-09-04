@@ -51,18 +51,19 @@
 # then closes the task with `tasks-axi done` - or, with `--release`, lifts the
 # hold with `tasks-axi unhold` so a captain-gated WORK item resumes instead of
 # closing. An exact retry is idempotent only when its requested close mode
-# matches the newest record; a changed decision or a mode mismatch is
-# rejected. A re-held task may record a new answer on top, and a reply that
-# repeats the answer already recorded for an earlier hold occurrence is
-# refused rather than spent on the new gate: an exact retry finishes the
-# interrupted close only while its own occurrence is the one still open. On a
-# task already closed outside this script, `answer` records the missing
-# resolution block (the old `repair` path) only when the task still carries
-# the captain-hold provenance tasks-axi preserves through a close, so an
-# ordinary finished task cannot be dressed up as an answered captain call. A
-# hold that expired by date (`--until` in the past) is still answerable: the
-# surviving hold annotations, not tasks-axi's live `held:` bit, prove the
-# captain owned it.
+# matches the mode that answer's own record carries - the several records one
+# gate can accumulate each keep their own; a changed decision or a mode
+# mismatch is rejected. A re-held task may record a new answer on top, and a
+# reply that repeats the answer already recorded for an earlier hold
+# occurrence is refused rather than spent on the new gate: an exact retry
+# finishes the interrupted close only while its own occurrence is the one
+# still open. On a task already closed outside this script, `answer` records
+# the missing resolution block (the old `repair` path) only when the task
+# still carries the captain-hold provenance tasks-axi preserves through a
+# close, so an ordinary finished task cannot be dressed up as an answered
+# captain call. A hold that expired by date (`--until` in the past) is still
+# answerable: the surviving hold annotations, not tasks-axi's live `held:`
+# bit, prove the captain owned it.
 #
 # ONE KEYED-ANSWER INTAKE, FED BY EVERY CHANNEL.
 # "A keyed answer resolves its matching captain-held task" is a single
@@ -74,7 +75,9 @@
 # close: `done` completes the task, `release` lifts the hold so held work
 # resumes, and an absent or empty mode retries whatever close a recorded
 # delivery of this same answer already began, or on a first delivery releases
-# a task currently In flight while completing a decision-only card. A staged
+# a task currently In flight while completing a decision-only card. A record
+# predating the mode line states no close, so it fixes nothing and falls
+# through to that same state rule rather than supplying one. A staged
 # `state/<id>.backlog-close` record proves that row's own work already
 # finished and only its cleanup was interrupted, so it completes on the
 # captain's answer rather than releasing even while it reads In flight.
@@ -751,8 +754,9 @@ command_answer() {
     # earlier gate means a stale echo of a settled delivery, refused rather
     # than spent on this gate whatever close mode either carries; none means a
     # NEW answer, which gets its own record on top naming the gate it answers.
-    # The close mode stays the caller's flag, checked against the row's newest
-    # recorded mode so a retry cannot silently flip a release into a close.
+    # The close mode stays the caller's flag, checked against the mode that
+    # matched record itself carries - not the row's newest, which may belong to
+    # another delivery - so a retry cannot silently flip a release into a close.
     matched=$(recorded_digest_occurrence "$body" "$DECISION_DIGEST")
     matched_occurrence=${matched%% *}
     matched_mode=''

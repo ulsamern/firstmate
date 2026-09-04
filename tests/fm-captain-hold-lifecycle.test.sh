@@ -735,28 +735,48 @@ test_direct_regate_after_a_settled_close_refuses_the_stale_echo() {
 # A record predating the `Resolution mode:` line states no close mode, so it
 # fixes nothing: the delivery that matches it must fall through to the same
 # state-derived default a first delivery gets, rather than completing gated
-# work whose own work never ran.
+# work whose own work never ran. The fixture is built from a record this
+# script wrote, so its digest is whatever the real composer produces, and the
+# record count proves the redelivery matched it instead of taking the
+# unmatched path that writes a second one.
 test_modeless_record_retry_falls_through_to_the_state_default() {
-  local home show out text digest
+  local home show out rc records
   home=$(make_home keyed-modeless-record)
   tasks_in "$home" add sample-modeless-work "Ship the modeless sample work" \
     --kind ship --repo sample --start >/dev/null \
     || fail "could not create the modeless-record fixture"
   run_captain "$home" hold sample-modeless-work --reason "captain go needed" >/dev/null \
     || fail "could not hold the modeless-record fixture"
-  # The decision text the intake composes for this exact delivery, recorded in
-  # the pre-`Resolution mode:` block shape.
-  text=$(printf 'Captain answered this call through %s.\nTask: %s\nAnswer: %s\nAnswer as shown to the captain: %s' \
-    "three-field channel fixture" "sample-modeless-work" "go" "Ship the modeless sample work")
-  if command -v shasum >/dev/null 2>&1; then
-    digest=$(printf '%s' "$text" | shasum -a 256 | awk '{print $1}')
-  else
-    digest=$(printf '%s' "$text" | sha256sum | awk '{print $1}')
-  fi
-  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\n\nCaptain decision:\n%s\n' \
-    "$digest" "$text" > "$home/modeless-body.txt"
-  tasks_in "$home" update sample-modeless-work --body-file "$home/modeless-body.txt" --archive-body >/dev/null \
-    || fail "could not install the modeless resolution record"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ "${2:-}" = "${TASKS_AXI_FAIL_DONE_ID:-}" ]; then
+  printf 'error: backlog write interrupted\n' >&2
+  exit 70
+fi
+exec "${REAL_TASKS_AXI:?}" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  set +e
+  printf 'sample-modeless-work\tgo\tShip the modeless sample work\tdone\n' \
+    | PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+      TASKS_AXI_FAIL_DONE_ID=sample-modeless-work FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" answers \
+      --source "three-field channel fixture" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the interrupted close reported success"
+  rm -f "$home/fakebin/tasks-axi"
+  # Strip the fields the pre-mode record format had no room for, leaving the
+  # script's own digest and decision text untouched.
+  tasks_in "$home" show sample-modeless-work --full \
+    | sed -n 's/^  body: //p' | jq -r . \
+    | grep -v '^Resolution mode: ' | grep -v '^Hold occurrence: ' \
+    > "$home/modeless-body.txt"
+  grep -q '^Decision digest: ' "$home/modeless-body.txt" \
+    || fail "the modeless fixture lost the record's own decision digest"
+  tasks_in "$home" update sample-modeless-work --body-file "$home/modeless-body.txt" \
+    --archive-body >/dev/null || fail "could not install the modeless resolution record"
 
   out=$(printf 'sample-modeless-work\tgo\tShip the modeless sample work\n' \
     | run_captain "$home" answers --source "three-field channel fixture") \
@@ -768,6 +788,9 @@ test_modeless_record_retry_falls_through_to_the_state_default() {
     "a modeless record completed gated work instead of releasing it"
   assert_contains "$show" "held: no" \
     "the delivery matching a modeless record did not lift the gate"
+  records=$(printf '%s' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 1 ] \
+    || fail "the redelivery did not match the modeless record; it wrote another one ($records)"
   pass "a modeless record falls through to the state-derived default"
 }
 
