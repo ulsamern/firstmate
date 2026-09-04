@@ -12,12 +12,14 @@ It never reads report bodies, review artifacts, terminal output, or chat.
 
 The `hold` subcommand places an existing task under an active captain hold, or creates the task when nothing exists to hold, then verifies the hold through `tasks-axi hold <id> --reason <reason> --kind captain`.
 Repeats are idempotent, a closed task is refused rather than reopened, and `--until` stores the captain's own deferral date through tasks-axi's date gate.
-Each hold also stamps the occurrence it publishes to the parent channel as a private record under `state/captain-hold-occurrence/`, which is what later tells an interrupted close apart from a new gate on the same row.
+Only a hold that opens a new gate mints a new occurrence: it stamps the occurrence it publishes to the parent channel as a private record under `state/captain-hold-occurrence/`, which is what later tells an interrupted close apart from a new gate on the same row.
+A hold placed over a row that is still captain-held has landed no close since that stamp - a repeat hold, or a deferral over an interrupted close whose record is written but whose close never ran - so it keeps and republishes the occurrence already open instead of counting that unlanded record as a finished gate.
 
 The `answer` subcommand records the captain's exact words and closes the call in the same act.
 It requires a non-empty captain decision file of at most 8192 bytes, writes a resolution block carrying the decision digest and a `Resolution mode:` at the top of the task body (the previous body is preserved below the block and archived through tasks-axi `--archive-body`), then runs `tasks-axi done` - or `tasks-axi unhold` under `--release`, so a captain-gated work item resumes instead of closing.
 An exact retry is idempotent only when the requested close mode matches the newest record; a drifted answer or mode mismatch is rejected, while a re-held task accepts a new answer as a new record on top.
 A re-held task and an interrupted close both leave a captain hold standing above a matching record, so the exact retry is scoped to the stamped hold occurrence: it finishes the interrupted close only while that same occurrence is the one open, and a reply that repeats an earlier occurrence's answer is refused so the new gate keeps its hold and its own answer.
+Only the re-held task's hold advanced the stamp, which is what lets the interrupted close still recognise the occurrence its own retry names even after a repeat hold.
 On a task closed outside the script, `answer` records the missing block only when the captain-hold annotations tasks-axi preserves through a close prove the captain owned it, and it verifies the task stays closed.
 A hold whose `--until` date has passed keeps those annotations while tasks-axi reports it no longer held, so an expired deferral remains answerable.
 

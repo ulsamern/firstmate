@@ -37,9 +37,12 @@
 # optional --origin records provenance in the new task's body and supplies the
 # default repo from that origin's metadata). Prefer holding the work item the
 # question gates over minting a new row. Repeating `hold` with the same id is
-# idempotent; a task already closed is refused rather than reopened. `--until`
-# records the captain's own deferral date through `tasks-axi hold --until`, so
-# a "revisit later" answer is stored as a date instead of a live card.
+# idempotent down to the occurrence it publishes: only a hold placed after the
+# previous close landed mints a new one, so a repeat hold, or a deferral over
+# an interrupted close, keeps the gate already open. A task already closed is
+# refused rather than reopened. `--until` records the captain's own deferral
+# date through `tasks-axi hold --until`, so a "revisit later" answer is stored
+# as a date instead of a live card.
 #
 # `answer` records the captain's exact words and closes the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes,
