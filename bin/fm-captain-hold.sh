@@ -416,6 +416,22 @@ resolution_record_count() {  # <task-body>
     | grep -Ec '^Resolution recorded by fm-(captain|decision)-hold\.$' || true
 }
 
+# Which gate an unstamped row has open, read off its own records rather than
+# counted: the newest record names the gate it answered, and a gate that
+# accumulated several records still names one. Only a body whose records all
+# predate that line falls back to the count, which is the position the newest
+# record would have held. Empty when the row carries no record at all.
+newest_record_occurrence() {  # <task-body>
+  local body
+  body=$(decode_shown_value "$1") || return 1
+  printf '%s\n' "$body" | awk '
+    /^Resolution recorded by fm-(captain|decision)-hold\.$/ { n += 1; head = 1; next }
+    head && index($0, "Hold occurrence: ") == 1 { o[n] = substr($0, 18); next }
+    head && $0 == "Captain decision:" { head = 0; next }
+    END { if (n) print (o[1] != "" ? o[1] : n) }
+  '
+}
+
 # Which hold occurrence recorded a given answer, and under which close mode:
 # the gate its own record names, so the several records one gate can accumulate
 # all answer that same gate. Records predating that line have none, and fall
@@ -566,7 +582,7 @@ write_hold_occurrence() {  # <task-id> <occurrence> [<settled-occurrence>]
 }
 
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind occurrence prior_hold_kind='' records stamp settled hold_record
+  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind occurrence prior_hold_kind='' records stamp settled hold_record shown_body
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -654,9 +670,10 @@ command_hold() {
       write_hold_occurrence "$id" "$occurrence" "$settled"
     fi
   else
-    records=$(resolution_record_count "$(show_field "$show" body)")
+    shown_body=$(show_field "$show" body)
+    records=$(resolution_record_count "$shown_body")
     if [ "$prior_hold_kind" = captain ] && [ "$records" -gt 0 ]; then
-      occurrence=$records
+      occurrence=$(newest_record_occurrence "$shown_body")
     else
       occurrence=$((records + 1))
       write_hold_occurrence "$id" "$occurrence" "$settled"
@@ -801,7 +818,8 @@ command_answer() {
     if [ -n "$open_occurrence" ]; then
       gate=$open_occurrence
     else
-      gate=$((occurrence - 1))
+      gate=$(newest_record_occurrence "$body")
+      [ -n "$gate" ] || gate=$occurrence
     fi
     if [ -n "$matched_occurrence" ] && [ "$matched_occurrence" = "$gate" ]; then
       case "$matched_mode" in

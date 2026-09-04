@@ -698,6 +698,67 @@ SH
   pass "a gate carrying two records stays retryable through either of them"
 }
 
+# A row that lost its private stamp still states which gate it has open: its
+# records name it. Deriving that gate from a record COUNT instead contradicts
+# them as soon as one gate carries two records, so the open gate must be read
+# off the records themselves.
+test_unstamped_multi_record_gate_stays_retryable() {
+  local home show out records stamp
+  home=$(make_home keyed-unstamped-multi-record)
+  stamp="$home/state/captain-hold-occurrence/sample-unstamped-pair.occurrence"
+  tasks_in "$home" add sample-unstamped-pair "Decide the unstamped sample pair" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the unstamped multi-record fixture"
+  run_captain "$home" hold sample-unstamped-pair --reason "captain decision pending" >/dev/null \
+    || fail "could not hold the unstamped multi-record fixture"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  done|unhold)
+    if [ "${2:-}" = "${TASKS_AXI_FAIL_CLOSE_ID:-}" ]; then
+      printf 'error: backlog write interrupted\n' >&2
+      exit 70
+    fi
+    ;;
+esac
+exec "${REAL_TASKS_AXI:?}" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  for delivery in "chat channel fixture:done" "board card fixture:release"; do
+    set +e
+    printf 'sample-unstamped-pair\tship it in April\tDecide the unstamped sample pair\t%s\n' \
+      "${delivery#*:}" \
+      | PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+        TASKS_AXI_FAIL_CLOSE_ID=sample-unstamped-pair FM_HOME="$home" \
+        FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+        FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" answers \
+        --source "${delivery%%:*}" >/dev/null 2>&1
+    set -e
+  done
+  rm -f "$home/fakebin/tasks-axi"
+  records=$(tasks_in "$home" show sample-unstamped-pair --full \
+    | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 2 ] || fail "the fixture did not leave two records on one gate ($records)"
+  # The shape of a row whose private stamp was pruned: its records still name
+  # the gate they answered.
+  rm -f "$stamp"
+  run_captain "$home" hold sample-unstamped-pair --reason "captain decision pending" >/dev/null \
+    || fail "the repeat hold on the unstamped multi-record row was refused"
+
+  out=$(printf 'sample-unstamped-pair\tship it in April\tDecide the unstamped sample pair\n' \
+    | run_captain "$home" answers --source "chat channel fixture") \
+    || fail "the older record's retry was refused on an unstamped multi-record gate"
+  assert_contains "$out" "closed: sample-unstamped-pair" \
+    "the retry on an unstamped multi-record gate was not applied"
+  show=$(tasks_in "$home" show sample-unstamped-pair --full)
+  assert_contains "$show" "state: done" \
+    "the retry on an unstamped multi-record gate did not finish the close"
+  records=$(printf '%s' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 2 ] \
+    || fail "the retry was not recognised as this gate's own; it wrote another record ($records)"
+  pass "an unstamped gate carrying two records is derived from its records, not a count"
+}
+
 # The stamp says which gate this script last placed, never whether its close
 # landed. Once an occurrence has settled, a gate re-placed with `tasks-axi hold`
 # directly is a NEW one, so the previous gate's answer is a stale echo that must
@@ -2153,6 +2214,7 @@ test_repeat_hold_over_an_interrupted_close_keeps_its_occurrence
 test_directly_held_gate_survives_a_repeat_hold_after_an_interrupted_close
 test_legacy_unstamped_row_keeps_its_interrupted_close_answerable
 test_two_records_on_one_gate_stay_retryable
+test_unstamped_multi_record_gate_stays_retryable
 test_direct_regate_after_a_settled_close_refuses_the_stale_echo
 test_modeless_record_retry_falls_through_to_the_state_default
 test_stale_reply_after_rehold_leaves_the_new_gate_intact

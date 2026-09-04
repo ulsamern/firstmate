@@ -17,6 +17,7 @@ A hold placed over a row that is still captain-held has landed no close since th
 Once that occurrence has settled, a captain hold standing over it again is a new gate however it was placed - including with `tasks-axi hold <id> --kind captain` directly - so the occurrence advances and the previous gate's answer is refused as the stale echo it is.
 A gate placed with `tasks-axi hold <id> --kind captain` directly carries no stamp, so `answer` reconciles one when it records that gate's first resolution; every record written on a stamped row therefore names the gate it answers, and a later repeat hold finds that stamp instead of minting a successor.
 A row that already carried records before this record existed proves nothing about which of its gates is open, so neither command guesses one: it stays unstamped on the permissive path, where its interrupted close remains answerable, until a landed close lets the next hold mint an occurrence honestly.
+While it is unstamped both commands read the open gate off the newest record's own `Hold occurrence:` line rather than off a count, so a gate that accumulated several records is still named once, and only a body whose records all predate that line falls back to the count.
 The stale-echo refusal is therefore a guarantee about stamped rows: an unstamped row keeps the older behaviour, in which an echo of a settled gate's answer is recorded and closes rather than being refused.
 
 The `answer` subcommand records the captain's exact words and closes the call in the same act.
