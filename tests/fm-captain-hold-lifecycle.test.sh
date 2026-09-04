@@ -517,6 +517,63 @@ SH
   pass "a repeat hold over an interrupted close keeps the occurrence its retry names"
 }
 
+# A gate may be placed with `tasks-axi hold ... --kind captain` directly, which
+# stamps no occurrence. The first answer must reconcile one for the gate it is
+# resolving, so a later documented repeat hold cannot mint a successor that
+# refuses that same gate's interrupted-close retry.
+test_directly_held_gate_survives_a_repeat_hold_after_an_interrupted_close() {
+  local home show out rc records
+  home=$(make_home keyed-direct-hold-rehold)
+  tasks_in "$home" add sample-direct-call "Decide the direct sample rollout" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the direct-hold fixture"
+  tasks_in "$home" hold sample-direct-call --reason "captain decision pending" --kind captain >/dev/null \
+    || fail "could not place the captain gate through tasks-axi directly"
+  assert_absent "$home/state/captain-hold-occurrence/sample-direct-call.occurrence" \
+    "a direct tasks-axi hold must not stamp an occurrence"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ "${2:-}" = "${TASKS_AXI_FAIL_DONE_ID:-}" ]; then
+  printf 'error: backlog write interrupted\n' >&2
+  exit 70
+fi
+exec "${REAL_TASKS_AXI:?}" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  set +e
+  printf 'sample-direct-call\tship it in December\tDecide the direct sample rollout\tdone\n' \
+    | PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+      TASKS_AXI_FAIL_DONE_ID=sample-direct-call FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" answers \
+      --source "three-field channel fixture" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the interrupted close on the direct gate reported success"
+  rm -f "$home/fakebin/tasks-axi"
+  show=$(tasks_in "$home" show sample-direct-call --full)
+  assert_contains "$show" "hold_kind: captain" "the interrupted close dropped the direct captain hold"
+  assert_contains "$show" "Resolution mode: answered" \
+    "the interrupted close on the direct gate did not record the answered mode"
+
+  run_captain "$home" hold sample-direct-call --reason "captain decision pending" >/dev/null \
+    || fail "the documented idempotent repeat hold was refused on the direct gate"
+
+  out=$(printf 'sample-direct-call\tship it in December\tDecide the direct sample rollout\n' \
+    | run_captain "$home" answers --source "three-field channel fixture") \
+    || fail "a repeat hold wedged the direct gate against its own interrupted-close retry"
+  assert_contains "$out" "closed: sample-direct-call" \
+    "the retry on the direct gate did not report the finished close"
+  show=$(tasks_in "$home" show sample-direct-call --full)
+  assert_contains "$show" "state: done" \
+    "the retry on the direct gate did not finish the interrupted close"
+  assert_contains "$show" "Resolution mode: answered" \
+    "the retry on the direct gate rewrote the recorded close mode"
+  records=$(printf '%s' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 1 ] || fail "the retry on the direct gate fabricated a second record ($records)"
+  pass "a directly held gate survives a repeat hold after an interrupted close"
+}
+
 # A re-hold opens a NEW captain call on the same row. A channel that replays
 # the previous occurrence's answer verbatim must not have it spent on the new
 # gate: nothing closes, the new hold stands with its single record, and the
@@ -1839,6 +1896,7 @@ test_release_frees_held_work
 test_default_keyed_answer_releases_in_flight_work
 test_default_keyed_answer_finishes_an_interrupted_close
 test_repeat_hold_over_an_interrupted_close_keeps_its_occurrence
+test_directly_held_gate_survives_a_repeat_hold_after_an_interrupted_close
 test_stale_reply_after_rehold_leaves_the_new_gate_intact
 test_stale_reply_with_a_changed_close_mode_is_refused
 test_keyed_answer_completes_a_call_row_left_in_flight_by_cleanup

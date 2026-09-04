@@ -495,10 +495,11 @@ hold_occurrence_path() { printf '%s/%s.occurrence\n' "$HOLD_OCCURRENCE_DIR" "$1"
 # Which captain hold is open on a task: the occurrence `hold` published to the
 # parent channel when it placed the newest one. The task row cannot answer this
 # on its own - an interrupted close and a re-held task both leave a captain
-# hold above a matching record - so `hold` stamps it here as private state.
-# Empty when this home never placed one, which keeps rows held before this
-# record existed on the older, permissive behaviour; a corrupted record is a
-# hard error rather than a silent "unknown".
+# hold above a matching record - so `hold` stamps it here as private state,
+# and `answer` reconciles a gate placed outside this script the first time it
+# resolves one. Empty only until either has run for this row, which keeps rows
+# held before this record existed on the older, permissive behaviour; a
+# corrupted record is a hard error rather than a silent "unknown".
 read_hold_occurrence() {  # <task-id>
   local path value schema
   path=$(hold_occurrence_path "$1")
@@ -712,11 +713,23 @@ command_answer() {
     # against an interrupted close's recorded mode so a retry cannot silently
     # flip a release into a close.
     matched_occurrence=$(recorded_digest_occurrence "$body" "$DECISION_DIGEST")
-    if [ -n "$matched_occurrence" ]; then
-      open_occurrence=$(read_hold_occurrence "$id")
-      if [ -n "$open_occurrence" ] && [ "$open_occurrence" != "$matched_occurrence" ]; then
-        fail "task $id already recorded this answer for captain hold occurrence $matched_occurrence; occurrence $open_occurrence is open and needs its own answer"
+    open_occurrence=$(read_hold_occurrence "$id")
+    # A gate placed with `tasks-axi hold ... --kind captain` rather than
+    # through this script carries no stamp, and this is the first act that
+    # needs one: reconcile it for the occurrence being answered. A retry of an
+    # interrupted close belongs to the gate its own record already names;
+    # anything else answers the gate this record is about to open. Recording it
+    # before the record itself keeps every record this script writes stamped.
+    if [ -z "$open_occurrence" ]; then
+      if [ "$matched_occurrence" = "$((occurrence - 1))" ]; then
+        open_occurrence=$((occurrence - 1))
+      else
+        open_occurrence=$occurrence
       fi
+      write_hold_occurrence "$id" "$open_occurrence"
+    fi
+    if [ -n "$matched_occurrence" ] && [ "$open_occurrence" != "$matched_occurrence" ]; then
+      fail "task $id already recorded this answer for captain hold occurrence $matched_occurrence; occurrence $open_occurrence is open and needs its own answer"
     fi
     if [ "$matched_occurrence" = "$((occurrence - 1))" ]; then
       recorded_mode=$(recorded_resolution_mode "$body" || true)
