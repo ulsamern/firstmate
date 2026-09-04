@@ -109,6 +109,11 @@ It also verifies that the parallel lanes, portable serial lane, and real-Herdr f
 It separately verifies that the portable serial CI shards are non-empty, disjoint, and together equal the portable serial lane.
 It reports the unmeasured serial share as `serial_unhinted=` and refuses when that share exceeds `PORTABLE_SERIAL_MAX_UNHINTED_PERCENT`, so the shards stay balanced on evidence rather than on the default weight.
 
+Every lane set the guard compares is built with `LC_ALL=C sort`, so the guard pins `LC_ALL=C` on the `comm` comparisons over them as well.
+The two collations genuinely disagree on the suite's own paths: `en_US.UTF-8` weighs punctuation after letters, so it orders `tests/fm-backend.test.sh` before its `tests/fm-backend-tmux-smoke.test.sh` sibling while the C collation orders them the other way.
+Without the pin, `--check-coverage` rejects its own sorted input with `comm: input is not in sorted order` and exits 1 under any such locale, so a complete and disjoint partition still fails the guard for the caller's locale alone.
+`tests/fm-test-run.test.sh` runs the guard again under the first installed UTF-8 locale that reverses that pair, which keeps the pin honest wherever such a locale exists.
+
 ## Timing artifacts
 
 Portable shards, each portable serial shard, and the Herdr lane upload runner-generated timing JSON.
