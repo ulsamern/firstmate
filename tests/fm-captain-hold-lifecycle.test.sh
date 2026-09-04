@@ -1219,6 +1219,48 @@ SH
   pass "a keyed answer completes a captain call row an interrupted cleanup left In flight"
 }
 
+# The occurrence record is per-task private state, so one malformed record must
+# cost its own key and nothing else: every other key in the same batch is still
+# answered, the caller still gets the summary line it parses, and the intake
+# reports the refusal as that key's own `skipped:` reason rather than letting
+# the read failure escape onto the caller's stderr.
+test_unreadable_occurrence_record_skips_only_its_own_key() {
+  local home out err rc show id
+  home=$(make_home keyed-unreadable-occurrence)
+  err="$home/answers.err"
+  for id in sample-batch-one sample-batch-two sample-batch-three; do
+    tasks_in "$home" add "$id" "Ship $id" --kind ship --repo sample --start >/dev/null \
+      || fail "could not create the batch fixture $id"
+    run_captain "$home" hold "$id" --reason "captain go needed for $id" >/dev/null \
+      || fail "could not hold the batch fixture $id"
+  done
+  printf 'schema=fm-captain-hold-occurrence.v1\noccurrence=not-a-number\n' \
+    > "$home/state/captain-hold-occurrence/sample-batch-two.occurrence"
+
+  set +e
+  out=$(printf 'sample-batch-one\tgo\tShip sample-batch-one\nsample-batch-two\tgo\tShip sample-batch-two\nsample-batch-three\tgo\tShip sample-batch-three\n' \
+    | run_captain "$home" answers --source "batch fixture" 2>"$err")
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a malformed occurrence record did not make the batch exit nonzero"
+  assert_contains "$out" "closed: sample-batch-one" \
+    "the key before the malformed record was not answered"
+  assert_contains "$out" "skipped: sample-batch-two" \
+    "the malformed occurrence record was not reported as its own key's skip"
+  assert_contains "$out" "closed: sample-batch-three" \
+    "a malformed occurrence record dropped the keys after it"
+  assert_contains "$out" "answers: closed=2 skipped=1" \
+    "the batch summary the caller parses was never printed"
+  show=$(tasks_in "$home" show sample-batch-three --full)
+  assert_contains "$show" "held: no" "the key after the malformed record did not release its work"
+  assert_contains "$show" "state: in_flight" "the key after the malformed record was completed"
+  show=$(tasks_in "$home" show sample-batch-two --full)
+  assert_contains "$show" "held: yes" "the skipped key lost its captain gate"
+  assert_no_grep 'fm-captain-hold: captain hold occurrence record' "$err" \
+    "the unreadable record escaped onto the caller's stderr instead of being that key's skip"
+  pass "a malformed occurrence record skips its own key and spares the batch"
+}
+
 # The pending close record is evidence about ONE dispatch of a row. A record an
 # earlier dispatch staged and never retired says nothing about the work running
 # now, so a keyed answer over a re-dispatched row must release that live work
@@ -1648,6 +1690,47 @@ EOF
     || fail "the second legacy gate disturbed the first gate's pair: $(cat "$channel")"
   assert_no_grep 'captain-hold-legacy-call-3' "$channel" \
     "the unstamped legacy answer published an occurrence its hold never opened"
+
+  # A record written before the `Hold occurrence:` line existed: the close and
+  # its own replay must derive the same gate, or the parent gains a resolution
+  # for an occurrence no hold ever opened.
+  run_captain "$mate" hold modeless-call --title "Choose the modeless release" \
+    --reason "modeless choice pending" --repo sample >/dev/null || fail "modeless hold failed"
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ "${2:-}" = "${TASKS_AXI_FAIL_CLOSE_ID:-}" ]; then
+  printf 'error: backlog write interrupted\n' >&2
+  exit 70
+fi
+exec "${REAL_TASKS_AXI:?}" "$@"
+SH
+  chmod +x "$fakebin/tasks-axi"
+  printf 'first modeless word\n' > "$decision"
+  set +e
+  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" TASKS_AXI_FAIL_CLOSE_ID=modeless-call \
+    FM_HOME="$mate" FM_STATE_OVERRIDE="$mate/state" FM_DATA_OVERRIDE="$mate/data" \
+    FM_CONFIG_OVERRIDE="$mate/config" "$ROOT/bin/fm-captain-hold.sh" answer modeless-call \
+    --decision-file "$decision" >/dev/null 2>&1
+  set -e
+  rm -f "$fakebin/tasks-axi"
+  # Strip the line the pre-record format had no room for, and the private stamp
+  # with it: the shape every install's interrupted close left behind.
+  tasks_in "$mate" show modeless-call --full | sed -n 's/^  body: //p' | jq -r . \
+    | grep -v '^Hold occurrence: ' > "$mate/modeless-body.txt"
+  grep -q '^Resolution mode: ' "$mate/modeless-body.txt" \
+    || fail "the modeless fixture lost the record's own close mode"
+  tasks_in "$mate" update modeless-call --body-file "$mate/modeless-body.txt" \
+    --archive-body >/dev/null || fail "could not install the pre-occurrence record"
+  rm -f "$mate/state/captain-hold-occurrence/modeless-call.occurrence"
+  printf 'ship the modeless release\n' > "$decision"
+  run_captain "$mate" answer modeless-call --decision-file "$decision" >/dev/null \
+    || fail "the modeless row refused a new answer"
+  assert_grep 'resolved [key=captain-hold-modeless-call-1]: captain hold modeless-call: answered' \
+    "$channel" "the modeless close resolved an occurrence its hold never opened"
+  run_captain "$mate" answer modeless-call --decision-file "$decision" >/dev/null \
+    || fail "the modeless replay was refused"
+  assert_no_grep 'captain-hold-modeless-call-2' "$channel" \
+    "the modeless replay published a gate no hold ever opened"
 
   # A settled gate that carries two records, with its stamp pruned: the replay
   # must resolve the occurrence the parent actually saw opened, not a count.
@@ -2510,6 +2593,7 @@ test_modeless_record_retry_falls_through_to_the_state_default
 test_stale_reply_after_rehold_leaves_the_new_gate_intact
 test_stale_reply_with_a_changed_close_mode_is_refused
 test_keyed_answer_completes_a_call_row_left_in_flight_by_cleanup
+test_unreadable_occurrence_record_skips_only_its_own_key
 test_superseded_pending_close_record_does_not_complete_live_work
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable

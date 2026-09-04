@@ -90,8 +90,10 @@
 # records, not only the newest - is reported `closed:` and is a no-op, unless
 # the row has since been re-held for a later gate: that stale
 # duplicate is skipped rather than spent on the new gate, which keeps its hold
-# and needs decision text of its own. A mode mismatch is skipped. The command
-# exits nonzero when any key was skipped. `--source` is provenance text
+# and needs decision text of its own. A mode mismatch is skipped, and so is a
+# key whose own occurrence record cannot be read, which leaves every other key
+# in the batch to be answered on its own terms. The command exits nonzero when
+# any key was skipped. `--source` is provenance text
 # recorded in the durable decision, never a behavior switch: this command has
 # no per-channel branch and no knowledge of chat, review decks, or any
 # transport.
@@ -415,35 +417,12 @@ body_has_resolution_record() {  # <task-body>
   return 1
 }
 
-# The recorded decision digest of either record format, from the show-escaped
-# body (multi-line bodies print as one quoted line with \n escapes). Records
-# are prepended, so the first match is the newest record.
-recorded_decision_digest() {  # <task-body>
-  local rest=$1
-  case "$rest" in
-    *"Decision digest: "*) rest=${rest#*"Decision digest: "} ;;
-    *) return 1 ;;
-  esac
-  rest=${rest%%\\n*}
-  rest=${rest%%$'\n'*}
-  printf '%s' "$rest"
-}
-
 # How many resolution records the shown body carries, in either record format.
 resolution_record_count() {  # <task-body>
   local body
   body=$(decode_shown_value "$1") || return 1
   printf '%s\n' "$body" \
     | grep -Ec '^Resolution recorded by fm-(captain|decision)-hold\.$' || true
-}
-
-# Whether any record in the body names the gate it answered. A body whose
-# records all predate that line proves nothing about its gates, so the
-# occurrence a new record would name there stays unwritten.
-body_states_hold_occurrence() {  # <task-body>
-  local body
-  body=$(decode_shown_value "$1") || return 1
-  printf '%s\n' "$body" | grep -q '^Hold occurrence: '
 }
 
 # Which gate an unstamped row has open, read off its own records rather than
@@ -488,18 +467,6 @@ recorded_digest_occurrence() {  # <task-body> <digest>; prints "<occurrence> <mo
       }
     }
   '
-}
-
-# The newest record's `Resolution mode:` value; empty for a record predating it.
-recorded_resolution_mode() {  # <task-body>
-  local rest=$1
-  case "$rest" in
-    *"Resolution mode: "*) rest=${rest#*"Resolution mode: "} ;;
-    *) return 1 ;;
-  esac
-  rest=${rest%%\\n*}
-  rest=${rest%%$'\n'*}
-  printf '%s' "$rest"
 }
 
 resolution_block() {  # <mode> <hold-occurrence-or-empty>
@@ -754,7 +721,7 @@ close_answered() {  # <task-id> <release-0-or-1>
 }
 
 command_answer() {
-  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode occurrence open_occurrence matched_occurrence matched_mode matched gate record_gate settled hold_record
+  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome occurrence open_occurrence matched_occurrence matched_mode matched gate record_gate settled hold_record
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -880,9 +847,7 @@ command_answer() {
       return 0
     fi
     record_gate=$open_occurrence
-    if [ -z "$record_gate" ] && body_states_hold_occurrence "$body"; then
-      record_gate=$gate
-    fi
+    [ -n "$record_gate" ] || record_gate=$gate
     write_resolution_record "$id" "$outcome" "$body" "$record_gate"
     close_answered "$id" "$release"
     show=$(task_show "$id") || fail "task $id disappeared after closing"
@@ -899,7 +864,6 @@ command_answer() {
   # it under its own mode - the rule every other replay path applies - while a
   # record naming an earlier gate is drift.
   if body_has_resolution_record "$body"; then
-    recorded_mode=$(recorded_resolution_mode "$body" || true)
     gate=$(hold_occurrence_stamp "$id")
     [ -n "$gate" ] || gate=$(newest_record_occurrence "$body")
     [ -n "$gate" ] || gate=$((occurrence - 1))
@@ -908,7 +872,7 @@ command_answer() {
     matched_mode=''
     case "$matched" in *' '*) matched_mode=${matched#* } ;; esac
     { [ -n "$matched" ] && [ "$matched_occurrence" = "$gate" ]; } \
-      || fail "task $id records a different captain decision with mode ${recorded_mode:-unknown}"
+      || fail "task $id records a different captain decision"
     [ "$matched_mode" = released ] && [ "$release" = 1 ] \
       || fail "task $id records this answer with mode ${matched_mode:-unknown}; replay requires matching --release"
     publish_parent_hold "$id" "$gate" resolved released
@@ -1123,7 +1087,12 @@ command_answers() {
     # the row has open or last settled - any of that gate's records, not only
     # the newest, which is how `answer` matches. A record naming an earlier
     # gate stays a stale echo rather than a replay.
-    replay_gate=$(hold_occurrence_stamp "$id")
+    if ! replay_gate=$(hold_occurrence_stamp "$id" 2>"$err"); then
+      reason=$(tr -d '\n' < "$err" | sed 's/^fm-captain-hold: //')
+      printf 'skipped: %s (%s)\n' "$id" "${reason:-unreadable captain hold occurrence record}"
+      skipped=$((skipped + 1))
+      continue
+    fi
     [ -n "$replay_gate" ] || replay_gate=$(newest_record_occurrence "$body")
     recorded_match=0
     if [ -n "$matched" ] && [ "$matched_occurrence" = "$replay_gate" ]; then
