@@ -563,7 +563,7 @@ read_hold_record() {  # <task-id>; prints "<occurrence> <settled>"
 # record count derives, which is what the parent channel saw for those rows.
 hold_occurrence_stamp() {  # <task-id>
   local record
-  record=$(read_hold_record "$1")
+  record=$(read_hold_record "$1") || return 1
   printf '%s\n' "${record%% *}"
 }
 

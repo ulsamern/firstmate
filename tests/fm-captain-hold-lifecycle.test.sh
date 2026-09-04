@@ -1223,7 +1223,10 @@ SH
 # cost its own key and nothing else: every other key in the same batch is still
 # answered, the caller still gets the summary line it parses, and the intake
 # reports the refusal as that key's own `skipped:` reason rather than letting
-# the read failure escape onto the caller's stderr.
+# the read failure escape onto the caller's stderr. A row whose gate already
+# settled is the case that proves the intake owns that refusal itself: nothing
+# downstream re-reads the record there, so an unreadable one must not be waved
+# through as a clean idempotent replay.
 test_unreadable_occurrence_record_skips_only_its_own_key() {
   local home out err rc show id
   home=$(make_home keyed-unreadable-occurrence)
@@ -1234,11 +1237,24 @@ test_unreadable_occurrence_record_skips_only_its_own_key() {
     run_captain "$home" hold "$id" --reason "captain go needed for $id" >/dev/null \
       || fail "could not hold the batch fixture $id"
   done
+  # A decision-only card whose gate is already answered and settled, so the
+  # redelivery below reaches the intake's own replay branch rather than the
+  # `answer` subprocess.
+  run_captain "$home" hold sample-batch-replay --title "Choose the batch replay" \
+    --reason "batch replay choice pending" --repo sample >/dev/null \
+    || fail "could not hold the settled batch fixture"
+  printf 'sample-batch-replay\tgo\tChoose the batch replay\n' \
+    | run_captain "$home" answers --source "batch fixture" >/dev/null \
+    || fail "the settled batch fixture was not answered"
+  show=$(tasks_in "$home" show sample-batch-replay --full)
+  assert_contains "$show" "state: done" "the settled batch fixture did not close"
   printf 'schema=fm-captain-hold-occurrence.v1\noccurrence=not-a-number\n' \
     > "$home/state/captain-hold-occurrence/sample-batch-two.occurrence"
+  printf 'schema=fm-captain-hold-occurrence.v1\noccurrence=not-a-number\n' \
+    > "$home/state/captain-hold-occurrence/sample-batch-replay.occurrence"
 
   set +e
-  out=$(printf 'sample-batch-one\tgo\tShip sample-batch-one\nsample-batch-two\tgo\tShip sample-batch-two\nsample-batch-three\tgo\tShip sample-batch-three\n' \
+  out=$(printf 'sample-batch-one\tgo\tShip sample-batch-one\nsample-batch-two\tgo\tShip sample-batch-two\nsample-batch-three\tgo\tShip sample-batch-three\nsample-batch-replay\tgo\tChoose the batch replay\n' \
     | run_captain "$home" answers --source "batch fixture" 2>"$err")
   rc=$?
   set -e
@@ -1249,7 +1265,11 @@ test_unreadable_occurrence_record_skips_only_its_own_key() {
     "the malformed occurrence record was not reported as its own key's skip"
   assert_contains "$out" "closed: sample-batch-three" \
     "a malformed occurrence record dropped the keys after it"
-  assert_contains "$out" "answers: closed=2 skipped=1" \
+  assert_contains "$out" "skipped: sample-batch-replay" \
+    "an unreadable occurrence record was waved through as a clean replay"
+  assert_not_contains "$out" "closed: sample-batch-replay" \
+    "a replay was reported closed over occurrence state the intake cannot read"
+  assert_contains "$out" "answers: closed=2 skipped=2" \
     "the batch summary the caller parses was never printed"
   show=$(tasks_in "$home" show sample-batch-three --full)
   assert_contains "$show" "held: no" "the key after the malformed record did not release its work"
