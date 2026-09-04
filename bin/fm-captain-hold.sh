@@ -84,13 +84,15 @@
 # Anything else is skipped. A key that names no task, a task that is not held
 # for the captain, or a task already closed is reported as `skipped:` and
 # feeds nothing. A replayed delivery whose answer digest and requested close
-# mode both match the newest record is reported `closed:` and is a no-op,
-# unless the row has since been re-held for a later gate: that stale duplicate
-# is skipped rather than spent on the new gate, which keeps its hold and needs
-# decision text of its own. A mode mismatch is skipped. The command exits
-# nonzero when any key was skipped. `--source` is provenance text recorded in
-# the durable decision, never a behavior switch: this command has no
-# per-channel branch and no knowledge of chat, review decks, or any transport.
+# mode match a record naming the gate the row has open or last settled - any
+# of that gate's records, not only the newest - is reported `closed:` and is a
+# no-op, unless the row has since been re-held for a later gate: that stale
+# duplicate is skipped rather than spent on the new gate, which keeps its hold
+# and needs decision text of its own. A mode mismatch is skipped. The command
+# exits nonzero when any key was skipped. `--source` is provenance text
+# recorded in the durable decision, never a behavior switch: this command has
+# no per-channel branch and no knowledge of chat, review decks, or any
+# transport.
 # Legacy input: an optional positional origin (or a stored concrete-origin
 # binding) makes a key that names no task fall back to the old
 # `<origin>-decision-<key>` identity, so an in-flight pre-collapse channel
@@ -1071,8 +1073,7 @@ command_answers() {
     replay_gate=$(hold_occurrence_stamp "$id")
     [ -n "$replay_gate" ] || replay_gate=$(newest_record_occurrence "$body")
     recorded_match=0
-    if [ -n "$matched" ] \
-      && { [ -z "$replay_gate" ] || [ "$matched_occurrence" = "$replay_gate" ]; }; then
+    if [ -n "$matched" ] && [ "$matched_occurrence" = "$replay_gate" ]; then
       recorded_match=1
     fi
     if [ -z "${mode:-}" ]; then
@@ -1087,7 +1088,6 @@ command_answers() {
         || { [ "$release_flag" = --release ] && [ "$state" != "done" ] \
           && [ "$hold_kind" != captain ] && [ "$matched_mode" = released ]; }; then
         occurrence=$replay_gate
-        [ -n "$occurrence" ] || occurrence=$(resolution_record_count "$body")
         case "$matched_mode" in
           repaired) publish_parent_hold "$id" "$occurrence" resolved "answered (repaired)" ;;
           released) publish_parent_hold "$id" "$occurrence" resolved released ;;
