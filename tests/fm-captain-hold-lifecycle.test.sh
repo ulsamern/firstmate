@@ -411,6 +411,58 @@ test_default_keyed_answer_releases_in_flight_work() {
   pass "default keyed answers release in-flight work and complete decision-only cards"
 }
 
+# An interrupted close leaves the row In flight with its record already reading
+# `answered`, so the three-field retry that follows must finish that close
+# instead of letting the In flight default flip it into a release.
+test_default_keyed_answer_finishes_an_interrupted_close() {
+  local home show out rc
+  home=$(make_home keyed-default-interrupted)
+  tasks_in "$home" add sample-interrupted-call "Decide the sample rollout" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the interrupted-close fixture"
+  run_captain "$home" hold sample-interrupted-call --reason "captain decision pending" >/dev/null \
+    || fail "could not hold the interrupted-close fixture"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ "${2:-}" = "${TASKS_AXI_FAIL_DONE_ID:-}" ]; then
+  printf 'error: backlog write interrupted\n' >&2
+  exit 70
+fi
+exec "${REAL_TASKS_AXI:?}" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  set +e
+  out=$(printf 'sample-interrupted-call\tship it in October\tDecide the sample rollout\tdone\n' \
+    | PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+      TASKS_AXI_FAIL_DONE_ID=sample-interrupted-call FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" answers \
+      --source "three-field channel fixture" 2>/dev/null)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an interrupted close reported success"
+  assert_contains "$out" "skipped: sample-interrupted-call" \
+    "the interrupted close was not reported as skipped"
+  rm -f "$home/fakebin/tasks-axi"
+  show=$(tasks_in "$home" show sample-interrupted-call --full)
+  assert_contains "$show" "state: in_flight" "the interrupted close left the row somewhere else"
+  assert_contains "$show" "hold_kind: captain" "the interrupted close dropped the captain hold"
+  assert_contains "$show" "Resolution mode: answered" \
+    "the interrupted close did not record the answered mode"
+
+  out=$(printf 'sample-interrupted-call\tship it in October\tDecide the sample rollout\n' \
+    | run_captain "$home" answers --source "three-field channel fixture") \
+    || fail "the three-field retry could not finish the interrupted close"
+  assert_contains "$out" "closed: sample-interrupted-call" \
+    "the three-field retry did not report the finished close"
+  show=$(tasks_in "$home" show sample-interrupted-call --full)
+  assert_contains "$show" "state: done" \
+    "the three-field retry released the interrupted close instead of finishing it"
+  assert_contains "$show" "Resolution mode: answered" \
+    "the three-field retry rewrote the recorded close mode"
+  pass "a three-field retry finishes an interrupted close instead of releasing it"
+}
+
 # Deferral is a date, not a live card: hold --until keeps the task out of
 # captain_actionable until due, tasks-axi's own date-gate expiry keeps the task
 # answerable, and Bearings renders the wait as a dated gate.
@@ -1568,6 +1620,7 @@ test_completion_gate_attests_and_transfers
 test_answer_records_and_closes
 test_release_frees_held_work
 test_default_keyed_answer_releases_in_flight_work
+test_default_keyed_answer_finishes_an_interrupted_close
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner
