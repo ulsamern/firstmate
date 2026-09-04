@@ -463,6 +463,54 @@ SH
   pass "a three-field retry finishes an interrupted close instead of releasing it"
 }
 
+# A re-hold opens a NEW captain call on the same row. A channel that replays
+# the previous occurrence's answer verbatim must not have it spent on the new
+# gate: nothing closes, the new hold stands with its single record, and the
+# gate still takes an answer of its own.
+test_stale_reply_after_rehold_leaves_the_new_gate_intact() {
+  local home show out rc records
+  home=$(make_home keyed-stale-rehold)
+  tasks_in "$home" add sample-gated-widget "Ship the gated sample widget" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the re-held work fixture"
+  run_captain "$home" hold sample-gated-widget --reason "captain go needed for gate one" >/dev/null \
+    || fail "could not place the first captain gate"
+  out=$(printf 'sample-gated-widget\tgo\tShip the gated sample widget\n' \
+    | run_captain "$home" answers --source "three-field channel fixture") \
+    || fail "the first keyed answer was not accepted"
+  assert_contains "$out" "closed: sample-gated-widget" "the first keyed answer was not applied"
+  show=$(tasks_in "$home" show sample-gated-widget --full)
+  assert_contains "$show" "held: no" "the first keyed answer did not lift the first gate"
+
+  run_captain "$home" hold sample-gated-widget --reason "captain go needed for gate two" >/dev/null \
+    || fail "could not place the second captain gate"
+  set +e
+  out=$(printf 'sample-gated-widget\tgo\tShip the gated sample widget\n' \
+    | run_captain "$home" answers --source "three-field channel fixture" 2>/dev/null)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a stale reply to the answered gate reported success"
+  assert_contains "$out" "skipped: sample-gated-widget" "the stale reply was not skipped"
+  show=$(tasks_in "$home" show sample-gated-widget --full)
+  assert_contains "$show" "held: yes" "a stale reply lifted the new captain gate"
+  assert_contains "$show" "hold_kind: captain" "a stale reply dropped the new captain hold"
+  assert_contains "$show" "hold_reason: captain go needed for gate two" \
+    "a stale reply replaced the new gate's reason"
+  records=$(printf '%s' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 1 ] || fail "a stale reply wrote another resolution record ($records)"
+
+  out=$(printf 'sample-gated-widget\tgo for gate two\tShip the gated sample widget\n' \
+    | run_captain "$home" answers --source "three-field channel fixture") \
+    || fail "the second gate refused an answer of its own"
+  assert_contains "$out" "closed: sample-gated-widget" "the second gate's answer was not applied"
+  show=$(tasks_in "$home" show sample-gated-widget --full)
+  assert_contains "$show" "held: no" "the second gate's answer did not lift its hold"
+  assert_contains "$show" "Answer: go for gate two" "the second gate's answer was not recorded"
+  records=$(printf '%s' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 2 ] || fail "the second gate's answer did not get its own record ($records)"
+  pass "a stale reply after a re-hold is skipped and the new captain gate stands"
+}
+
 # Deferral is a date, not a live card: hold --until keeps the task out of
 # captain_actionable until due, tasks-axi's own date-gate expiry keeps the task
 # answerable, and Bearings renders the wait as a dated gate.
@@ -1621,6 +1669,7 @@ test_answer_records_and_closes
 test_release_frees_held_work
 test_default_keyed_answer_releases_in_flight_work
 test_default_keyed_answer_finishes_an_interrupted_close
+test_stale_reply_after_rehold_leaves_the_new_gate_intact
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner

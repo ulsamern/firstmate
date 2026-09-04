@@ -48,14 +48,18 @@
 # then closes the task with `tasks-axi done` - or, with `--release`, lifts the
 # hold with `tasks-axi unhold` so a captain-gated WORK item resumes instead of
 # closing. An exact retry is idempotent only when its requested close mode
-# matches the newest record; a changed decision or a mode mismatch is rejected.
-# A re-held task may record a new answer on top. On a task already closed outside this script,
-# `answer` records the missing resolution block (the old `repair` path) only
-# when the task still carries the captain-hold provenance tasks-axi preserves
-# through a close, so an ordinary finished task cannot be dressed up as an
-# answered captain call. A hold that expired by date (`--until` in the past) is
-# still answerable: the surviving hold annotations, not tasks-axi's live
-# `held:` bit, prove the captain owned it.
+# matches the newest record; a changed decision or a mode mismatch is
+# rejected. A re-held task may record a new answer on top, and a reply that
+# repeats the answer already recorded for an earlier hold occurrence is
+# refused rather than spent on the new gate: an exact retry finishes the
+# interrupted close only while its own occurrence is the one still open. On a
+# task already closed outside this script, `answer` records the missing
+# resolution block (the old `repair` path) only when the task still carries
+# the captain-hold provenance tasks-axi preserves through a close, so an
+# ordinary finished task cannot be dressed up as an answered captain call. A
+# hold that expired by date (`--until` in the past) is still answerable: the
+# surviving hold annotations, not tasks-axi's live `held:` bit, prove the
+# captain owned it.
 #
 # ONE KEYED-ANSWER INTAKE, FED BY EVERY CHANNEL.
 # "A keyed answer resolves its matching captain-held task" is a single
@@ -454,6 +458,48 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints the resolved id or fails
   fail "no captain-held task $entry in $CAPTAIN_BACKLOG_FILE"
 }
 
+HOLD_OCCURRENCE_DIR="$STATE/captain-hold-occurrence"
+HOLD_OCCURRENCE_SCHEMA=fm-captain-hold-occurrence.v1
+
+hold_occurrence_path() { printf '%s/%s.occurrence\n' "$HOLD_OCCURRENCE_DIR" "$1"; }
+
+# Which captain hold is open on a task: the occurrence `hold` published to the
+# parent channel when it placed the newest one. The task row cannot answer this
+# on its own - an interrupted close and a re-held task both leave a captain
+# hold above a matching record - so `hold` stamps it here as private state.
+# Empty when this home never placed one, which keeps rows held before this
+# record existed on the older, permissive behaviour; a corrupted record is a
+# hard error rather than a silent "unknown".
+read_hold_occurrence() {  # <task-id>
+  local path value schema
+  path=$(hold_occurrence_path "$1")
+  [ -e "$path" ] || return 0
+  [ -f "$path" ] && [ ! -L "$path" ] || fail "captain hold occurrence record is unsafe: $path"
+  schema=$(sed -n 's/^schema=//p' "$path" | head -1)
+  [ "$schema" = "$HOLD_OCCURRENCE_SCHEMA" ] \
+    || fail "captain hold occurrence record has an incompatible schema: $path"
+  value=$(sed -n 's/^occurrence=//p' "$path" | head -1)
+  case "$value" in
+    ''|*[!0-9]*) fail "captain hold occurrence record has an invalid occurrence: $path" ;;
+  esac
+  printf '%s\n' "$value"
+}
+
+write_hold_occurrence() {  # <task-id> <occurrence>
+  local dest tmp
+  (umask 077; mkdir -p "$HOLD_OCCURRENCE_DIR") || fail "cannot create $HOLD_OCCURRENCE_DIR"
+  [ -d "$HOLD_OCCURRENCE_DIR" ] && [ ! -L "$HOLD_OCCURRENCE_DIR" ] \
+    || fail "captain hold occurrence dir is unsafe: $HOLD_OCCURRENCE_DIR"
+  dest=$(hold_occurrence_path "$1")
+  tmp=$(umask 077; mktemp "$HOLD_OCCURRENCE_DIR/.occurrence.XXXXXX") \
+    || fail "cannot stage the captain hold occurrence for $1"
+  if ! { printf 'schema=%s\noccurrence=%s\n' "$HOLD_OCCURRENCE_SCHEMA" "$2" > "$tmp" \
+    && chmod 0600 "$tmp" && mv -f -- "$tmp" "$dest"; }; then
+    rm -f -- "$tmp"
+    fail "cannot record the captain hold occurrence for $1"
+  fi
+}
+
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind occurrence
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
@@ -521,6 +567,7 @@ command_hold() {
   hold_kind=$(show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
+  write_hold_occurrence "$id" "$occurrence"
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
   printf '%s\n' "$id"
 }
@@ -557,7 +604,7 @@ close_answered() {  # <task-id> <release-0-or-1>
 }
 
 command_answer() {
-  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode occurrence
+  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode occurrence open_occurrence
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -624,6 +671,9 @@ command_answer() {
     # silently flip a release into a close.
     if body_has_resolution_record "$body" \
       && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ]; then
+      open_occurrence=$(read_hold_occurrence "$id")
+      [ -z "$open_occurrence" ] || [ "$open_occurrence" = "$((occurrence - 1))" ] \
+        || fail "task $id already recorded this answer for captain hold occurrence $((occurrence - 1)); occurrence $open_occurrence is open and needs its own answer"
       recorded_mode=$(recorded_resolution_mode "$body" || true)
       case "$recorded_mode" in
         released) [ "$release" = 1 ] || fail "task $id records this answer as a release; retry with --release" ;;
