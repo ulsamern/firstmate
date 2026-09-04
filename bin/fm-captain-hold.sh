@@ -413,22 +413,25 @@ resolution_record_count() {  # <task-body>
     | grep -Ec '^Resolution recorded by fm-(captain|decision)-hold\.$' || true
 }
 
-# Which occurrence recorded a given answer, derived positionally rather than
-# from any stored index: records are prepended, so the first record in the
-# decoded body is the newest and carries the highest occurrence. Prints the
-# newest occurrence whose record carries <digest>, and nothing when no record
-# carries it. The close mode is deliberately not part of this question: the
-# same delivery answered under a different mode is still that delivery.
+# Which hold occurrence recorded a given answer: the gate its own record names,
+# so the several records one gate can accumulate all answer that same gate.
+# Records predating that line have none, and fall back to the position they
+# hold in the body - records are prepended, so the first is the newest and
+# carries the highest occurrence. Prints the newest occurrence whose record
+# carries <digest>, and nothing when no record carries it. The close mode is
+# deliberately not part of this question: the same delivery answered under a
+# different mode is still that delivery.
 recorded_digest_occurrence() {  # <task-body> <digest>
   local body
   body=$(decode_shown_value "$1") || return 1
   printf '%s\n' "$body" | awk -v want="$2" '
     /^Resolution recorded by fm-(captain|decision)-hold\.$/ { n += 1; head = 1; next }
     head && index($0, "Decision digest: ") == 1 { d[n] = substr($0, 18); next }
+    head && index($0, "Hold occurrence: ") == 1 { o[n] = substr($0, 18); next }
     head && $0 == "Captain decision:" { head = 0; next }
     END {
       for (i = 1; i <= n; i++) {
-        if (d[i] == want) { print n - i + 1; exit }
+        if (d[i] == want) { print (o[i] != "" ? o[i] : n - i + 1); exit }
       }
     }
   '
@@ -446,9 +449,11 @@ recorded_resolution_mode() {  # <task-body>
   printf '%s' "$rest"
 }
 
-resolution_block() {  # <mode>
-  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n\nCaptain decision:\n%s\n' \
-    "$DECISION_DIGEST" "$1" "$DECISION_TEXT"
+resolution_block() {  # <mode> <hold-occurrence-or-empty>
+  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\nResolution mode: %s\n' \
+    "$DECISION_DIGEST" "$1"
+  [ -z "$2" ] || printf 'Hold occurrence: %s\n' "$2"
+  printf '\nCaptain decision:\n%s\n' "$DECISION_TEXT"
 }
 
 # Durable state of one captain call: an active captain hold (annotations
@@ -624,9 +629,9 @@ command_hold() {
 
 # Record a resolution block at the top of the task body, preserving the
 # previous body below it and archiving the pristine original.
-write_resolution_record() {  # <task-id> <mode> <shown-body>
+write_resolution_record() {  # <task-id> <mode> <shown-body> [<hold-occurrence>]
   local id=$1 mode=$2 body=$3 new_body tmp
-  new_body=$(resolution_block "$mode")
+  new_body=$(resolution_block "$mode" "${4:-}")
   body=$(decode_shown_value "$body") \
     || fail "could not decode the existing body for $id"
   if [ -n "$body" ]; then
@@ -654,7 +659,7 @@ close_answered() {  # <task-id> <release-0-or-1>
 }
 
 command_answer() {
-  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode occurrence open_occurrence matched_occurrence
+  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode occurrence open_occurrence matched_occurrence gate
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -715,13 +720,13 @@ command_answer() {
   if [ "$hold_kind" = captain ]; then
     # Actively the captain's item (a date-expired hold keeps its annotations
     # and stays answerable). One question decides it: which occurrence, if any,
-    # already recorded this exact answer. The open one means an interrupted
-    # close to finish; any earlier one means a stale echo of that gate's
-    # delivery, refused rather than spent on this gate whatever close mode
-    # either carries; none means a NEW answer on a re-held task, which gets its
-    # own record on top. The close mode stays the caller's flag, checked
-    # against an interrupted close's recorded mode so a retry cannot silently
-    # flip a release into a close.
+    # already recorded this exact answer. The open gate means an interrupted
+    # close to finish, whichever of that gate's records carries the answer; an
+    # earlier gate means a stale echo of a settled delivery, refused rather
+    # than spent on this gate whatever close mode either carries; none means a
+    # NEW answer, which gets its own record on top naming the gate it answers.
+    # The close mode stays the caller's flag, checked against the row's newest
+    # recorded mode so a retry cannot silently flip a release into a close.
     matched_occurrence=$(recorded_digest_occurrence "$body" "$DECISION_DIGEST")
     open_occurrence=$(read_hold_occurrence "$id")
     # A gate placed with `tasks-axi hold ... --kind captain` rather than
@@ -739,23 +744,30 @@ command_answer() {
       && [ "$open_occurrence" != "$matched_occurrence" ]; then
       fail "task $id already recorded this answer for captain hold occurrence $matched_occurrence; occurrence $open_occurrence is open and needs its own answer"
     fi
-    if [ "$matched_occurrence" = "$((occurrence - 1))" ]; then
+    if [ -n "$open_occurrence" ]; then
+      gate=$open_occurrence
+    elif [ "$matched_occurrence" = "$((occurrence - 1))" ]; then
+      gate=$((occurrence - 1))
+    else
+      gate=$occurrence
+    fi
+    if [ -n "$matched_occurrence" ] && [ "$matched_occurrence" = "$gate" ]; then
       recorded_mode=$(recorded_resolution_mode "$body" || true)
       case "$recorded_mode" in
         released) [ "$release" = 1 ] || fail "task $id records this answer as a release; retry with --release" ;;
         answered) [ "$release" = 0 ] || fail "task $id records this answer as a close; retry without --release" ;;
       esac
       close_answered "$id" "$release"
-      publish_parent_hold "$id" $((occurrence - 1)) resolved "$outcome"
+      publish_parent_hold "$id" "$gate" resolved "$outcome"
       printf '%s: %s\n' "$outcome" "$id"
       return 0
     fi
-    write_resolution_record "$id" "$outcome" "$body"
+    write_resolution_record "$id" "$outcome" "$body" "$open_occurrence"
     close_answered "$id" "$release"
     show=$(task_show "$id") || fail "task $id disappeared after closing"
     body_has_resolution_record "$(show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
-    publish_parent_hold "$id" "$occurrence" resolved "$outcome"
+    publish_parent_hold "$id" "$gate" resolved "$outcome"
     printf '%s: %s\n' "$outcome" "$id"
     return 0
   fi

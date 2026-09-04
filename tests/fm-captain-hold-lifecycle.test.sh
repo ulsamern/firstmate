@@ -633,6 +633,58 @@ SH
   pass "a legacy unstamped row keeps its interrupted close answerable through a repeat hold"
 }
 
+# One gate can accumulate more than one record: an interrupted close, then the
+# same captain words redelivered through another channel whose provenance gives
+# them a different digest. Every record on that still-open gate is a valid
+# retry, so finishing the close must not depend on which one the retry matches.
+test_two_records_on_one_gate_stay_retryable() {
+  local home show out rc records
+  home=$(make_home keyed-two-records-one-gate)
+  tasks_in "$home" add sample-twice-called "Decide the twice-answered rollout" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the two-record fixture"
+  run_captain "$home" hold sample-twice-called --reason "captain decision pending" >/dev/null \
+    || fail "could not hold the two-record fixture"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ "${2:-}" = "${TASKS_AXI_FAIL_DONE_ID:-}" ]; then
+  printf 'error: backlog write interrupted\n' >&2
+  exit 70
+fi
+exec "${REAL_TASKS_AXI:?}" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  for source in "chat channel fixture" "board card fixture"; do
+    set +e
+    printf 'sample-twice-called\tship it in March\tDecide the twice-answered rollout\tdone\n' \
+      | PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+        TASKS_AXI_FAIL_DONE_ID=sample-twice-called FM_HOME="$home" \
+        FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+        FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" answers \
+        --source "$source" >/dev/null 2>&1
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "an interrupted close reported success for $source"
+  done
+  rm -f "$home/fakebin/tasks-axi"
+  show=$(tasks_in "$home" show sample-twice-called --full)
+  assert_contains "$show" "hold_kind: captain" "the interrupted closes dropped the captain hold"
+  records=$(printf '%s' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 2 ] || fail "the two deliveries did not leave two records on one gate ($records)"
+
+  out=$(printf 'sample-twice-called\tship it in March\tDecide the twice-answered rollout\n' \
+    | run_captain "$home" answers --source "board card fixture") \
+    || fail "the newest record's own retry was refused on its still-open gate"
+  assert_contains "$out" "closed: sample-twice-called" \
+    "the retry on a gate carrying two records did not report the finished close"
+  show=$(tasks_in "$home" show sample-twice-called --full)
+  assert_contains "$show" "state: done" \
+    "the retry on a gate carrying two records did not finish the interrupted close"
+  records=$(printf '%s' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 2 ] || fail "the retry fabricated another record instead of finishing the close ($records)"
+  pass "a gate carrying two records stays retryable through either of them"
+}
+
 # A re-hold opens a NEW captain call on the same row. A channel that replays
 # the previous occurrence's answer verbatim must not have it spent on the new
 # gate: nothing closes, the new hold stands with its single record, and the
@@ -1957,6 +2009,7 @@ test_default_keyed_answer_finishes_an_interrupted_close
 test_repeat_hold_over_an_interrupted_close_keeps_its_occurrence
 test_directly_held_gate_survives_a_repeat_hold_after_an_interrupted_close
 test_legacy_unstamped_row_keeps_its_interrupted_close_answerable
+test_two_records_on_one_gate_stay_retryable
 test_stale_reply_after_rehold_leaves_the_new_gate_intact
 test_stale_reply_with_a_changed_close_mode_is_refused
 test_keyed_answer_completes_a_call_row_left_in_flight_by_cleanup
