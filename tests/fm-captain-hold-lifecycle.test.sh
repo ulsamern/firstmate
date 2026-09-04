@@ -647,33 +647,44 @@ test_two_records_on_one_gate_stay_retryable() {
     || fail "could not hold the two-record fixture"
   cat > "$home/fakebin/tasks-axi" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = done ] && [ "${2:-}" = "${TASKS_AXI_FAIL_DONE_ID:-}" ]; then
-  printf 'error: backlog write interrupted\n' >&2
-  exit 70
-fi
+case "${1:-}" in
+  done|unhold)
+    if [ "${2:-}" = "${TASKS_AXI_FAIL_CLOSE_ID:-}" ]; then
+      printf 'error: backlog write interrupted\n' >&2
+      exit 70
+    fi
+    ;;
+esac
 exec "${REAL_TASKS_AXI:?}" "$@"
 SH
   chmod +x "$home/fakebin/tasks-axi"
-  for source in "chat channel fixture" "board card fixture"; do
+  # The two deliveries declare DIFFERENT close modes, so the older record reads
+  # `answered` while the newest reads `released` - the input on which the
+  # matched-record rule and a newest-record rule disagree.
+  for delivery in "chat channel fixture:done" "board card fixture:release"; do
     set +e
-    printf 'sample-twice-called\tship it in March\tDecide the twice-answered rollout\tdone\n' \
+    printf 'sample-twice-called\tship it in March\tDecide the twice-answered rollout\t%s\n' \
+      "${delivery#*:}" \
       | PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
-        TASKS_AXI_FAIL_DONE_ID=sample-twice-called FM_HOME="$home" \
+        TASKS_AXI_FAIL_CLOSE_ID=sample-twice-called FM_HOME="$home" \
         FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
         FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" answers \
-        --source "$source" >/dev/null 2>&1
+        --source "${delivery%%:*}" >/dev/null 2>&1
     rc=$?
     set -e
-    [ "$rc" -ne 0 ] || fail "an interrupted close reported success for $source"
+    [ "$rc" -ne 0 ] || fail "an interrupted close reported success for ${delivery%%:*}"
   done
   rm -f "$home/fakebin/tasks-axi"
   show=$(tasks_in "$home" show sample-twice-called --full)
   assert_contains "$show" "hold_kind: captain" "the interrupted closes dropped the captain hold"
+  assert_contains "$show" "Resolution mode: released" \
+    "the newest record did not take the second delivery's declared release mode"
   records=$(printf '%s' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
   [ "$records" = 2 ] || fail "the two deliveries did not leave two records on one gate ($records)"
 
   # The OLDER of the two records, retried in its own three-field form: the
-  # intake must derive that record's own close mode, not the row's newest.
+  # intake must derive that record's own `answered` mode and complete, where
+  # the row's newest record would have demanded --release and refused.
   out=$(printf 'sample-twice-called\tship it in March\tDecide the twice-answered rollout\n' \
     | run_captain "$home" answers --source "chat channel fixture") \
     || fail "an older record's own retry was refused on its still-open gate"

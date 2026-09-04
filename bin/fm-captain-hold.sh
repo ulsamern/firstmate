@@ -539,6 +539,16 @@ read_hold_record() {  # <task-id>; prints "<occurrence> <settled>"
   printf '%s %s\n' "$occurrence" "$settled"
 }
 
+# The gate a replay or repair names: the occurrence this home stamped, which is
+# the one `hold` published and the captain path resolves. Empty when the row
+# was never stamped, leaving each caller to fall back to the position its
+# record count derives, which is what the parent channel saw for those rows.
+hold_occurrence_stamp() {  # <task-id>
+  local record
+  record=$(read_hold_record "$1")
+  printf '%s\n' "${record%% *}"
+}
+
 write_hold_occurrence() {  # <task-id> <occurrence> [<settled-occurrence>]
   local dest tmp
   (umask 077; mkdir -p "$HOLD_OCCURRENCE_DIR") || fail "cannot create $HOLD_OCCURRENCE_DIR"
@@ -722,10 +732,12 @@ command_answer() {
         || fail "task $id records this answer with mode released; a closed task cannot replay that release"
       [ "$release" = 0 ] \
         || fail "task $id records this answer with mode ${recorded_mode:-unknown}; --release cannot reopen a closed task"
+      gate=$(hold_occurrence_stamp "$id")
+      [ -n "$gate" ] || gate=$((occurrence - 1))
       if [ "$recorded_mode" = repaired ]; then
-        publish_parent_hold "$id" $((occurrence - 1)) resolved "answered (repaired)"
+        publish_parent_hold "$id" "$gate" resolved "answered (repaired)"
       else
-        publish_parent_hold "$id" $((occurrence - 1)) resolved answered
+        publish_parent_hold "$id" "$gate" resolved answered
       fi
       printf 'answered: %s\n' "$id"
       return 0
@@ -736,12 +748,13 @@ command_answer() {
     # this really was the captain's item rather than ordinary finished work.
     [ "$hold_kind" = captain ] \
       || fail "task $id was never held for the captain; nothing to record an answer on"
-    write_resolution_record "$id" repaired "$body"
+    gate=$(hold_occurrence_stamp "$id")
+    write_resolution_record "$id" repaired "$body" "$gate"
     show=$(task_show "$id") || fail "task $id disappeared while recording the answer"
     [ "$(show_field "$show" state)" = "done" ] || fail "recording the answer reopened closed task $id"
     body_has_resolution_record "$(show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
-    publish_parent_hold "$id" "$occurrence" resolved "answered (repaired)"
+    publish_parent_hold "$id" "${gate:-$occurrence}" resolved "answered (repaired)"
     printf 'repaired: %s\n' "$id"
     return 0
   fi
@@ -819,7 +832,9 @@ command_answer() {
       || fail "task $id records a different captain decision with mode ${recorded_mode:-unknown}"
     [ "$recorded_mode" = released ] && [ "$release" = 1 ] \
       || fail "task $id records this answer with mode ${recorded_mode:-unknown}; replay requires matching --release"
-    publish_parent_hold "$id" $((occurrence - 1)) resolved released
+    gate=$(hold_occurrence_stamp "$id")
+    [ -n "$gate" ] || gate=$((occurrence - 1))
+    publish_parent_hold "$id" "$gate" resolved released
     printf 'released: %s\n' "$id"
     return 0
   fi
@@ -1034,7 +1049,8 @@ command_answers() {
       if { [ -z "$release_flag" ] && [ "$state" = "done" ] && [ "$recorded_mode" != released ]; } \
         || { [ "$release_flag" = --release ] && [ "$state" != "done" ] \
           && [ "$hold_kind" != captain ] && [ "$recorded_mode" = released ]; }; then
-        occurrence=$(resolution_record_count "$body")
+        occurrence=$(hold_occurrence_stamp "$id")
+        [ -n "$occurrence" ] || occurrence=$(resolution_record_count "$body")
         case "$recorded_mode" in
           repaired) publish_parent_hold "$id" "$occurrence" resolved "answered (repaired)" ;;
           released) publish_parent_hold "$id" "$occurrence" resolved released ;;
