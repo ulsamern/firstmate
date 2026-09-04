@@ -496,10 +496,11 @@ hold_occurrence_path() { printf '%s/%s.occurrence\n' "$HOLD_OCCURRENCE_DIR" "$1"
 # parent channel when it placed the newest one. The task row cannot answer this
 # on its own - an interrupted close and a re-held task both leave a captain
 # hold above a matching record - so `hold` stamps it here as private state,
-# and `answer` reconciles a gate placed outside this script the first time it
-# resolves one. Empty only until either has run for this row, which keeps rows
-# held before this record existed on the older, permissive behaviour; a
-# corrupted record is a hard error rather than a silent "unknown".
+# and `answer` reconciles a gate placed outside this script when it records
+# that gate's first resolution. Empty while neither could establish the
+# occurrence without guessing, which keeps rows carrying records from before
+# this record existed on the older, permissive behaviour; a corrupted record is
+# a hard error rather than a silent "unknown".
 read_hold_occurrence() {  # <task-id>
   local path value schema
   path=$(hold_occurrence_path "$1")
@@ -531,7 +532,7 @@ write_hold_occurrence() {  # <task-id> <occurrence>
 }
 
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind occurrence prior_hold_kind=''
+  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind occurrence prior_hold_kind='' records
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -601,12 +602,21 @@ command_hold() {
   # captain-held has not closed anything since its stamp - a repeat hold, or a
   # deferral over an interrupted close whose record is written but whose close
   # never ran - so it keeps the occurrence it already opened rather than
-  # counting that record as a gate that finished.
+  # counting that record as a gate that finished. A still-captain-held row that
+  # carries records but no stamp predates this record entirely: its newest
+  # close cannot have landed (a landed close leaves the row done or unheld), so
+  # the open gate is that record's own occurrence, and it is left unstamped on
+  # the permissive path rather than stamped from a count that cannot prove it.
   occurrence=''
   [ "$prior_hold_kind" != captain ] || occurrence=$(read_hold_occurrence "$id")
   if [ -z "$occurrence" ]; then
-    occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
-    write_hold_occurrence "$id" "$occurrence"
+    records=$(resolution_record_count "$(show_field "$show" body)")
+    if [ "$prior_hold_kind" = captain ] && [ "$records" -gt 0 ]; then
+      occurrence=$records
+    else
+      occurrence=$((records + 1))
+      write_hold_occurrence "$id" "$occurrence"
+    fi
   fi
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
   printf '%s\n' "$id"
@@ -715,20 +725,18 @@ command_answer() {
     matched_occurrence=$(recorded_digest_occurrence "$body" "$DECISION_DIGEST")
     open_occurrence=$(read_hold_occurrence "$id")
     # A gate placed with `tasks-axi hold ... --kind captain` rather than
-    # through this script carries no stamp, and this is the first act that
-    # needs one: reconcile it for the occurrence being answered. A retry of an
-    # interrupted close belongs to the gate its own record already names;
-    # anything else answers the gate this record is about to open. Recording it
-    # before the record itself keeps every record this script writes stamped.
-    if [ -z "$open_occurrence" ]; then
-      if [ "$matched_occurrence" = "$((occurrence - 1))" ]; then
-        open_occurrence=$((occurrence - 1))
-      else
-        open_occurrence=$occurrence
-      fi
+    # through this script carries no stamp, and answering a row that carries no
+    # record yet is the one moment its occurrence is certain: it is the gate
+    # this first record opens. Reconciling it here keeps every record this
+    # script writes stamped. A row that already carries records but no stamp
+    # predates the record and stays unstamped on the permissive path, because
+    # nothing on it proves which of its gates is the open one.
+    if [ -z "$open_occurrence" ] && [ "$((occurrence - 1))" -eq 0 ]; then
+      open_occurrence=$occurrence
       write_hold_occurrence "$id" "$open_occurrence"
     fi
-    if [ -n "$matched_occurrence" ] && [ "$open_occurrence" != "$matched_occurrence" ]; then
+    if [ -n "$matched_occurrence" ] && [ -n "$open_occurrence" ] \
+      && [ "$open_occurrence" != "$matched_occurrence" ]; then
       fail "task $id already recorded this answer for captain hold occurrence $matched_occurrence; occurrence $open_occurrence is open and needs its own answer"
     fi
     if [ "$matched_occurrence" = "$((occurrence - 1))" ]; then

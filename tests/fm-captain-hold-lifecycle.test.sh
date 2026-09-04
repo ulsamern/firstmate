@@ -574,6 +574,65 @@ SH
   pass "a directly held gate survives a repeat hold after an interrupted close"
 }
 
+# A row that already carried a resolution record before occurrence stamps
+# existed cannot prove which of its gates is open, so `hold` must leave it
+# unstamped on the permissive path instead of guessing a successor that would
+# refuse the open gate's own retry.
+test_legacy_unstamped_row_keeps_its_interrupted_close_answerable() {
+  local home show out rc records stamp
+  home=$(make_home keyed-legacy-unstamped)
+  stamp="$home/state/captain-hold-occurrence/sample-legacy-call.occurrence"
+  tasks_in "$home" add sample-legacy-call "Decide the legacy sample rollout" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the legacy-row fixture"
+  run_captain "$home" hold sample-legacy-call --reason "captain decision pending" >/dev/null \
+    || fail "could not hold the legacy-row fixture"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ "${2:-}" = "${TASKS_AXI_FAIL_DONE_ID:-}" ]; then
+  printf 'error: backlog write interrupted\n' >&2
+  exit 70
+fi
+exec "${REAL_TASKS_AXI:?}" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  set +e
+  printf 'sample-legacy-call\tship it in January\tDecide the legacy sample rollout\tdone\n' \
+    | PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+      TASKS_AXI_FAIL_DONE_ID=sample-legacy-call FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" answers \
+      --source "three-field channel fixture" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the interrupted close reported success"
+  rm -f "$home/fakebin/tasks-axi"
+  # Drop the stamp: this is the shape of a row whose record was written before
+  # the occurrence record existed at all.
+  rm -f "$stamp"
+  show=$(tasks_in "$home" show sample-legacy-call --full)
+  assert_contains "$show" "hold_kind: captain" "the interrupted close dropped the captain hold"
+  assert_contains "$show" "Resolution mode: answered" \
+    "the interrupted close did not record the answered mode"
+
+  run_captain "$home" hold sample-legacy-call --reason "captain decision pending" >/dev/null \
+    || fail "the documented idempotent repeat hold was refused on the legacy row"
+  assert_absent "$stamp" \
+    "a repeat hold stamped a guessed occurrence onto a legacy unstamped row"
+
+  out=$(printf 'sample-legacy-call\tship it in January\tDecide the legacy sample rollout\n' \
+    | run_captain "$home" answers --source "three-field channel fixture") \
+    || fail "a repeat hold wedged the legacy row against its own interrupted-close retry"
+  assert_contains "$out" "closed: sample-legacy-call" \
+    "the retry on the legacy row did not report the finished close"
+  show=$(tasks_in "$home" show sample-legacy-call --full)
+  assert_contains "$show" "state: done" \
+    "the retry on the legacy row did not finish the interrupted close"
+  records=$(printf '%s' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 1 ] || fail "the retry on the legacy row fabricated a second record ($records)"
+  pass "a legacy unstamped row keeps its interrupted close answerable through a repeat hold"
+}
+
 # A re-hold opens a NEW captain call on the same row. A channel that replays
 # the previous occurrence's answer verbatim must not have it spent on the new
 # gate: nothing closes, the new hold stands with its single record, and the
@@ -1897,6 +1956,7 @@ test_default_keyed_answer_releases_in_flight_work
 test_default_keyed_answer_finishes_an_interrupted_close
 test_repeat_hold_over_an_interrupted_close_keeps_its_occurrence
 test_directly_held_gate_survives_a_repeat_hold_after_an_interrupted_close
+test_legacy_unstamped_row_keeps_its_interrupted_close_answerable
 test_stale_reply_after_rehold_leaves_the_new_gate_intact
 test_stale_reply_with_a_changed_close_mode_is_refused
 test_keyed_answer_completes_a_call_row_left_in_flight_by_cleanup
