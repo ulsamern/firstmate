@@ -166,10 +166,15 @@
 # publishes `needs-decision [key=captain-hold-<task>-<n>]` and `answer` (and
 # `answers`) the matching `resolved` line on the parent channel through
 # bin/fm-parent-channel-lib.sh, whether or not the mate model appends anything.
-# <n> is the count of resolution records the body already carries plus one, so
-# a released and re-held task opens and closes a distinct parent decision with
-# no new persisted state, and an exact retry republishes the same line, which
-# the channel deduplicates. A main home has no channel and publishes nothing.
+# <n> is the hold occurrence, private per-task state under
+# `state/captain-hold-occurrence/` that only a hold opening a NEW gate mints:
+# a repeat hold over the gate already open republishes that key, while a
+# released and re-held task opens and closes a distinct parent decision, and
+# an exact retry republishes the same line, which the channel deduplicates.
+# A row carrying records but no such state reads the occurrence off the newest
+# record's own `Hold occurrence:` line, and only records written before that
+# line existed fall back to a count. A main home has no channel and publishes
+# nothing.
 # The hold or answer is already durable in the backlog, so a channel that
 # cannot be written is reported as `actionable:` on stderr rather than undoing
 # the record; bin/fm-inactive-reconcile.sh's diagnostics name a broken binding.
@@ -721,7 +726,7 @@ close_answered() {  # <task-id> <release-0-or-1>
 }
 
 command_answer() {
-  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome occurrence open_occurrence matched_occurrence matched_mode matched gate record_gate settled hold_record
+  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome occurrence open_occurrence matched_occurrence matched_mode matched gate settled hold_record
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -846,9 +851,7 @@ command_answer() {
       printf '%s: %s\n' "$outcome" "$id"
       return 0
     fi
-    record_gate=$open_occurrence
-    [ -n "$record_gate" ] || record_gate=$gate
-    write_resolution_record "$id" "$outcome" "$body" "$record_gate"
+    write_resolution_record "$id" "$outcome" "$body" "$gate"
     close_answered "$id" "$release"
     show=$(task_show "$id") || fail "task $id disappeared after closing"
     body_has_resolution_record "$(show_field "$show" body)" \
