@@ -672,17 +672,64 @@ SH
   records=$(printf '%s' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
   [ "$records" = 2 ] || fail "the two deliveries did not leave two records on one gate ($records)"
 
+  # The OLDER of the two records, retried in its own three-field form: the
+  # intake must derive that record's own close mode, not the row's newest.
   out=$(printf 'sample-twice-called\tship it in March\tDecide the twice-answered rollout\n' \
-    | run_captain "$home" answers --source "board card fixture") \
-    || fail "the newest record's own retry was refused on its still-open gate"
+    | run_captain "$home" answers --source "chat channel fixture") \
+    || fail "an older record's own retry was refused on its still-open gate"
   assert_contains "$out" "closed: sample-twice-called" \
-    "the retry on a gate carrying two records did not report the finished close"
+    "the older record's retry did not report the finished close"
   show=$(tasks_in "$home" show sample-twice-called --full)
   assert_contains "$show" "state: done" \
-    "the retry on a gate carrying two records did not finish the interrupted close"
+    "the older record's retry did not finish the interrupted close"
   records=$(printf '%s' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
   [ "$records" = 2 ] || fail "the retry fabricated another record instead of finishing the close ($records)"
   pass "a gate carrying two records stays retryable through either of them"
+}
+
+# The stamp says which gate this script last placed, never whether its close
+# landed. Once an occurrence has settled, a gate re-placed with `tasks-axi hold`
+# directly is a NEW one, so the previous gate's answer is a stale echo that must
+# not lift it.
+test_direct_regate_after_a_settled_close_refuses_the_stale_echo() {
+  local home show out rc records
+  home=$(make_home keyed-direct-regate)
+  tasks_in "$home" add sample-regated-work "Ship the re-gated sample work" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the re-gate fixture"
+  run_captain "$home" hold sample-regated-work --reason "captain go needed for gate one" >/dev/null \
+    || fail "could not place the first captain gate"
+  out=$(printf 'sample-regated-work\tgo\tShip the re-gated sample work\n' \
+    | run_captain "$home" answers --source "chat channel fixture") \
+    || fail "the first keyed answer was not accepted"
+  assert_contains "$out" "closed: sample-regated-work" "the first keyed answer was not applied"
+  show=$(tasks_in "$home" show sample-regated-work --full)
+  assert_contains "$show" "held: no" "the first keyed answer did not lift the first gate"
+
+  tasks_in "$home" hold sample-regated-work --reason "captain go needed for gate two" \
+    --kind captain >/dev/null \
+    || fail "could not re-gate the row through tasks-axi directly"
+  set +e
+  out=$(printf 'sample-regated-work\tgo\tShip the re-gated sample work\n' \
+    | run_captain "$home" answers --source "chat channel fixture" 2>/dev/null)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a stale echo lifted a directly re-placed captain gate"
+  assert_contains "$out" "skipped: sample-regated-work" \
+    "the stale echo over a directly re-placed gate was not skipped"
+  show=$(tasks_in "$home" show sample-regated-work --full)
+  assert_contains "$show" "held: yes" "a stale echo lifted the directly re-placed gate"
+  assert_contains "$show" "hold_kind: captain" "a stale echo dropped the directly re-placed hold"
+  records=$(printf '%s' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 1 ] || fail "a stale echo wrote another resolution record ($records)"
+
+  out=$(printf 'sample-regated-work\tgo for gate two\tShip the re-gated sample work\n' \
+    | run_captain "$home" answers --source "chat channel fixture") \
+    || fail "the directly re-placed gate refused an answer of its own"
+  show=$(tasks_in "$home" show sample-regated-work --full)
+  assert_contains "$show" "held: no" "the second gate's own answer did not lift it"
+  assert_contains "$show" "Answer: go for gate two" "the second gate's answer was not recorded"
+  pass "a settled occurrence makes a direct re-gate refuse the previous gate's echo"
 }
 
 # A re-hold opens a NEW captain call on the same row. A channel that replays
@@ -1190,6 +1237,29 @@ EOF
     || fail "idempotent batch answer retry failed"
   [ "$(grep -c 'resolved \[key=captain-hold-batch-call-1\]' "$channel")" = 1 ] \
     || fail "batch retry did not restore exactly one parent resolution: $(cat "$channel")"
+
+  # A row left unstamped from before the occurrence record existed: hold and
+  # answer must still name the same gate, or the parent keeps an open decision
+  # for a task that is fully answered.
+  run_captain "$mate" hold legacy-call --title "Choose the legacy release" \
+    --reason "legacy choice pending" --repo sample >/dev/null || fail "legacy hold failed"
+  printf 'go ahead\n' > "$decision"
+  run_captain "$mate" answer legacy-call --decision-file "$decision" --release >/dev/null \
+    || fail "legacy release answer failed"
+  tasks_in "$mate" hold legacy-call --reason "legacy second choice" --kind captain >/dev/null \
+    || fail "could not re-gate the legacy row through tasks-axi directly"
+  rm -f "$mate/state/captain-hold-occurrence/legacy-call.occurrence"
+  run_captain "$mate" hold legacy-call --reason "legacy second choice" >/dev/null \
+    || fail "repeat hold on the unstamped legacy row failed"
+  assert_grep 'needs-decision [key=captain-hold-legacy-call-1]: captain hold legacy-call: legacy second choice' \
+    "$channel" "the unstamped legacy row did not reopen its own occurrence"
+  printf 'ship the legacy release\n' > "$decision"
+  run_captain "$mate" answer legacy-call --decision-file "$decision" --release >/dev/null \
+    || fail "legacy second answer failed"
+  assert_grep 'resolved [key=captain-hold-legacy-call-1]: captain hold legacy-call: released' \
+    "$channel" "the unstamped legacy answer resolved a different occurrence than its hold opened"
+  assert_no_grep 'captain-hold-legacy-call-2' "$channel" \
+    "the unstamped legacy answer published an occurrence its hold never opened"
 
   run_captain "$parent" hold main-call --title "Choose the main release" \
     --reason "main choice pending" --repo sample >/dev/null || fail "main hold failed"
@@ -2010,6 +2080,7 @@ test_repeat_hold_over_an_interrupted_close_keeps_its_occurrence
 test_directly_held_gate_survives_a_repeat_hold_after_an_interrupted_close
 test_legacy_unstamped_row_keeps_its_interrupted_close_answerable
 test_two_records_on_one_gate_stay_retryable
+test_direct_regate_after_a_settled_close_refuses_the_stale_echo
 test_stale_reply_after_rehold_leaves_the_new_gate_intact
 test_stale_reply_with_a_changed_close_mode_is_refused
 test_keyed_answer_completes_a_call_row_left_in_flight_by_cleanup

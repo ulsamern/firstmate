@@ -413,25 +413,29 @@ resolution_record_count() {  # <task-body>
     | grep -Ec '^Resolution recorded by fm-(captain|decision)-hold\.$' || true
 }
 
-# Which hold occurrence recorded a given answer: the gate its own record names,
-# so the several records one gate can accumulate all answer that same gate.
-# Records predating that line have none, and fall back to the position they
-# hold in the body - records are prepended, so the first is the newest and
-# carries the highest occurrence. Prints the newest occurrence whose record
-# carries <digest>, and nothing when no record carries it. The close mode is
-# deliberately not part of this question: the same delivery answered under a
-# different mode is still that delivery.
-recorded_digest_occurrence() {  # <task-body> <digest>
+# Which hold occurrence recorded a given answer, and under which close mode:
+# the gate its own record names, so the several records one gate can accumulate
+# all answer that same gate. Records predating that line have none, and fall
+# back to the position they hold in the body - records are prepended, so the
+# first is the newest and carries the highest occurrence. Prints the newest
+# record carrying <digest> as "<occurrence> <mode>", and nothing when no record
+# carries it. The mode is that record's own, not the row's newest, so a
+# delivery is always retried as the close it began.
+recorded_digest_occurrence() {  # <task-body> <digest>; prints "<occurrence> <mode>"
   local body
   body=$(decode_shown_value "$1") || return 1
   printf '%s\n' "$body" | awk -v want="$2" '
     /^Resolution recorded by fm-(captain|decision)-hold\.$/ { n += 1; head = 1; next }
     head && index($0, "Decision digest: ") == 1 { d[n] = substr($0, 18); next }
+    head && index($0, "Resolution mode: ") == 1 { m[n] = substr($0, 18); next }
     head && index($0, "Hold occurrence: ") == 1 { o[n] = substr($0, 18); next }
     head && $0 == "Captain decision:" { head = 0; next }
     END {
       for (i = 1; i <= n; i++) {
-        if (d[i] == want) { print (o[i] != "" ? o[i] : n - i + 1); exit }
+        if (d[i] == want) {
+          print (o[i] != "" ? o[i] : n - i + 1) " " m[i]
+          exit
+        }
       }
     }
   '
@@ -521,7 +525,28 @@ read_hold_occurrence() {  # <task-id>
   printf '%s\n' "$value"
 }
 
-write_hold_occurrence() {  # <task-id> <occurrence>
+
+# The newest occurrence whose close actually landed. The stamp alone cannot say
+# so - a gate re-placed with `tasks-axi hold` directly leaves the same stamp
+# above a settled record - so the close writes this back and both commands read
+# it to tell a still-open gate from one already spent. Empty on records written
+# before the field existed, which leaves them on the older behaviour.
+read_hold_settled() {  # <task-id>
+  local path value schema
+  path=$(hold_occurrence_path "$1")
+  [ -e "$path" ] || return 0
+  [ -f "$path" ] && [ ! -L "$path" ] || fail "captain hold occurrence record is unsafe: $path"
+  schema=$(sed -n 's/^schema=//p' "$path" | head -1)
+  [ "$schema" = "$HOLD_OCCURRENCE_SCHEMA" ] \
+    || fail "captain hold occurrence record has an incompatible schema: $path"
+  value=$(sed -n 's/^settled=//p' "$path" | head -1)
+  case "$value" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  printf '%s\n' "$value"
+}
+
+write_hold_occurrence() {  # <task-id> <occurrence> [<settled-occurrence>]
   local dest tmp
   (umask 077; mkdir -p "$HOLD_OCCURRENCE_DIR") || fail "cannot create $HOLD_OCCURRENCE_DIR"
   [ -d "$HOLD_OCCURRENCE_DIR" ] && [ ! -L "$HOLD_OCCURRENCE_DIR" ] \
@@ -529,7 +554,8 @@ write_hold_occurrence() {  # <task-id> <occurrence>
   dest=$(hold_occurrence_path "$1")
   tmp=$(umask 077; mktemp "$HOLD_OCCURRENCE_DIR/.occurrence.XXXXXX") \
     || fail "cannot stage the captain hold occurrence for $1"
-  if ! { printf 'schema=%s\noccurrence=%s\n' "$HOLD_OCCURRENCE_SCHEMA" "$2" > "$tmp" \
+  if ! { { printf 'schema=%s\noccurrence=%s\n' "$HOLD_OCCURRENCE_SCHEMA" "$2"
+      [ -z "${3:-}" ] || printf 'settled=%s\n' "$3"; } > "$tmp" \
     && chmod 0600 "$tmp" && mv -f -- "$tmp" "$dest"; }; then
     rm -f -- "$tmp"
     fail "cannot record the captain hold occurrence for $1"
@@ -537,7 +563,7 @@ write_hold_occurrence() {  # <task-id> <occurrence>
 }
 
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind occurrence prior_hold_kind='' records
+  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind occurrence prior_hold_kind='' records stamp settled
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -603,24 +629,32 @@ command_hold() {
   show=$(task_show "$id") || fail "task $id disappeared while holding it"
   hold_kind=$(show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
-  # Only a landed close mints a new occurrence. A row that was ALREADY
-  # captain-held has not closed anything since its stamp - a repeat hold, or a
-  # deferral over an interrupted close whose record is written but whose close
-  # never ran - so it keeps the occurrence it already opened rather than
-  # counting that record as a gate that finished. A still-captain-held row that
-  # carries records but no stamp predates this record entirely: its newest
+  # Only a settled close mints a new occurrence. A row still holding the gate
+  # its stamp names has closed nothing since - a repeat hold, or a deferral
+  # over an interrupted close whose record is written but whose close never ran
+  # - so it keeps that occurrence. Once that occurrence's close has landed, an
+  # active hold over it is a NEW gate however it was placed, including with
+  # `tasks-axi hold` directly, so the stamp advances. A still-captain-held row
+  # that carries records but no stamp predates this record entirely: its newest
   # close cannot have landed (a landed close leaves the row done or unheld), so
   # the open gate is that record's own occurrence, and it is left unstamped on
   # the permissive path rather than stamped from a count that cannot prove it.
-  occurrence=''
-  [ "$prior_hold_kind" != captain ] || occurrence=$(read_hold_occurrence "$id")
-  if [ -z "$occurrence" ]; then
+  stamp=$(read_hold_occurrence "$id")
+  settled=$(read_hold_settled "$id")
+  if [ -n "$stamp" ]; then
+    if [ "$prior_hold_kind" = captain ] && [ "$settled" != "$stamp" ]; then
+      occurrence=$stamp
+    else
+      occurrence=$((stamp + 1))
+      write_hold_occurrence "$id" "$occurrence" "$settled"
+    fi
+  else
     records=$(resolution_record_count "$(show_field "$show" body)")
     if [ "$prior_hold_kind" = captain ] && [ "$records" -gt 0 ]; then
       occurrence=$records
     else
       occurrence=$((records + 1))
-      write_hold_occurrence "$id" "$occurrence"
+      write_hold_occurrence "$id" "$occurrence" "$settled"
     fi
   fi
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
@@ -659,7 +693,7 @@ close_answered() {  # <task-id> <release-0-or-1>
 }
 
 command_answer() {
-  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode occurrence open_occurrence matched_occurrence gate
+  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode occurrence open_occurrence matched_occurrence matched_mode matched gate settled
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -727,18 +761,27 @@ command_answer() {
     # NEW answer, which gets its own record on top naming the gate it answers.
     # The close mode stays the caller's flag, checked against the row's newest
     # recorded mode so a retry cannot silently flip a release into a close.
-    matched_occurrence=$(recorded_digest_occurrence "$body" "$DECISION_DIGEST")
+    matched=$(recorded_digest_occurrence "$body" "$DECISION_DIGEST")
+    matched_occurrence=${matched%% *}
+    matched_mode=''
+    case "$matched" in *' '*) matched_mode=${matched#* } ;; esac
     open_occurrence=$(read_hold_occurrence "$id")
+    settled=$(read_hold_settled "$id")
     # A gate placed with `tasks-axi hold ... --kind captain` rather than
-    # through this script carries no stamp, and answering a row that carries no
-    # record yet is the one moment its occurrence is certain: it is the gate
-    # this first record opens. Reconciling it here keeps every record this
-    # script writes stamped. A row that already carries records but no stamp
-    # predates the record and stays unstamped on the permissive path, because
-    # nothing on it proves which of its gates is the open one.
-    if [ -z "$open_occurrence" ] && [ "$((occurrence - 1))" -eq 0 ]; then
+    # through this script leaves the stamp saying whatever this script last
+    # placed. Answering a row that carries no record yet fixes its occurrence
+    # for the first time; answering over a stamp whose close already settled
+    # means that direct hold opened a NEW gate, which takes the next
+    # occurrence. Either way the stamp is reconciled before any record is
+    # written. A row carrying records but no stamp predates the record and
+    # stays unstamped on the permissive path, because nothing on it proves
+    # which of its gates is the open one.
+    if [ -n "$open_occurrence" ] && [ "$settled" = "$open_occurrence" ]; then
+      open_occurrence=$((open_occurrence + 1))
+      write_hold_occurrence "$id" "$open_occurrence" "$settled"
+    elif [ -z "$open_occurrence" ] && [ "$((occurrence - 1))" -eq 0 ]; then
       open_occurrence=$occurrence
-      write_hold_occurrence "$id" "$open_occurrence"
+      write_hold_occurrence "$id" "$open_occurrence" "$settled"
     fi
     if [ -n "$matched_occurrence" ] && [ -n "$open_occurrence" ] \
       && [ "$open_occurrence" != "$matched_occurrence" ]; then
@@ -746,18 +789,18 @@ command_answer() {
     fi
     if [ -n "$open_occurrence" ]; then
       gate=$open_occurrence
-    elif [ "$matched_occurrence" = "$((occurrence - 1))" ]; then
+    elif [ "$((occurrence - 1))" -gt 0 ]; then
       gate=$((occurrence - 1))
     else
       gate=$occurrence
     fi
     if [ -n "$matched_occurrence" ] && [ "$matched_occurrence" = "$gate" ]; then
-      recorded_mode=$(recorded_resolution_mode "$body" || true)
-      case "$recorded_mode" in
+      case "$matched_mode" in
         released) [ "$release" = 1 ] || fail "task $id records this answer as a release; retry with --release" ;;
         answered) [ "$release" = 0 ] || fail "task $id records this answer as a close; retry without --release" ;;
       esac
       close_answered "$id" "$release"
+      [ -z "$open_occurrence" ] || write_hold_occurrence "$id" "$gate" "$gate"
       publish_parent_hold "$id" "$gate" resolved "$outcome"
       printf '%s: %s\n' "$outcome" "$id"
       return 0
@@ -767,6 +810,7 @@ command_answer() {
     show=$(task_show "$id") || fail "task $id disappeared after closing"
     body_has_resolution_record "$(show_field "$show" body)" \
       || fail "captain-held task $id did not retain its durable resolution record"
+    [ -z "$open_occurrence" ] || write_hold_occurrence "$id" "$gate" "$gate"
     publish_parent_hold "$id" "$gate" resolved "$outcome"
     printf '%s: %s\n' "$outcome" "$id"
     return 0
@@ -889,7 +933,7 @@ pending_close_marker_exists() {  # <task-id>
 
 command_answers() {
   local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
-  local recorded_digest recorded_mode recorded_match occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
+  local recorded_digest recorded_mode recorded_match matched matched_mode occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --source) shift; source=${1:-} ;;
@@ -968,15 +1012,23 @@ command_answers() {
           && [ -n "$legacy_digest" ] && [ "$recorded_digest" = "$legacy_digest" ]; }; }; then
       recorded_match=1
     fi
-    # No card-declared mode, so the intake picks the close. A record of this
+    # No card-declared mode, so the intake picks the close. Any record of this
     # same answer already fixed it, so an interrupted close is retried as
-    # whatever it started as; only a first delivery reads it off the state,
-    # where work still in flight is released rather than completed - unless a
-    # pending close record proves that row's own work already finished, which
-    # leaves the captain's call to complete on his answer.
+    # whatever it started as - read off that record rather than the row's
+    # newest, which `answer` matches the same way; only a first delivery reads
+    # it off the state, where work still in flight is released rather than
+    # completed - unless a pending close record proves that row's own work
+    # already finished, which leaves the captain's call to complete on his
+    # answer.
+    matched=$(recorded_digest_occurrence "$body" "$digest")
+    if [ -z "$matched" ] && [ -n "$legacy_digest" ]; then
+      matched=$(recorded_digest_occurrence "$body" "$legacy_digest")
+    fi
+    matched_mode=''
+    case "$matched" in *' '*) matched_mode=${matched#* } ;; esac
     if [ -z "${mode:-}" ]; then
-      if [ "$recorded_match" = 1 ]; then
-        [ "$recorded_mode" != released ] || release_flag=--release
+      if [ -n "$matched" ]; then
+        [ "$matched_mode" != released ] || release_flag=--release
       elif [ "$state" = in_flight ] && ! pending_close_marker_exists "$id"; then
         release_flag=--release
       fi
