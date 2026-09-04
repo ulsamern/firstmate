@@ -574,6 +574,58 @@ test_stale_reply_with_a_changed_close_mode_is_refused() {
   pass "a stale reply is refused even when its close mode no longer matches the record"
 }
 
+# An interrupted cleanup leaves the captain's OWN call row In flight with its
+# pending close record staged. That record is durable evidence the row's work
+# already finished, so a three-field keyed answer must complete the call rather
+# than read In flight as work the answer would resume.
+test_keyed_answer_completes_a_call_row_left_in_flight_by_cleanup() {
+  local home id wt show out rc
+  home=$(make_home keyed-stalled-cleanup)
+  id=sample-cleanup-stalled-call
+  wt="$home/projects/$id"
+  mkdir -p "$home/data/$id" "$wt" "$home/projects/sample"
+  tasks_in "$home" add "$id" "Investigate the stalled sample cleanup" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the stalled-cleanup fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$home/projects/sample" \
+    "harness=codex" "kind=scout" "mode=scout" "spawn_gen=fixture-$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Stalled cleanup\n\nThe captain call remains open.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold "$id" --reason "captain must choose after the stalled cleanup" >/dev/null \
+    || fail "could not hold the stalled-cleanup fixture"
+  run_captain "$home" complete "$id" "$id" >/dev/null \
+    || fail "completion gate failed for the stalled-cleanup fixture"
+  cat > "$home/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$home/fakebin/treehouse"
+  set +e
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the stalled-cleanup fixture completed instead of failing part-way"
+  assert_present "$home/state/$id.backlog-close" \
+    "the stalled cleanup did not stage the pending close record"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "state: in_flight" "the stalled cleanup did not leave the call row In flight"
+  assert_contains "$show" "hold_kind: captain" "the stalled cleanup dropped the captain hold"
+
+  out=$(printf '%s\tgo with option A\tInvestigate the stalled sample cleanup\n' "$id" \
+    | run_captain "$home" answers --source "three-field channel fixture") \
+    || fail "the three-field answer was refused for the stalled call row"
+  assert_contains "$out" "closed: $id" "the stalled call row's answer was not applied"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "state: done" \
+    "a keyed answer released the captain's own call row instead of completing it"
+  assert_contains "$show" "Resolution mode: answered" \
+    "a keyed answer recorded the wrong close mode on the captain's own call row"
+  assert_contains "$show" "Answer: go with option A" "the keyed answer lost the captain's words"
+  pass "a keyed answer completes a captain call row an interrupted cleanup left In flight"
+}
+
 # Deferral is a date, not a live card: hold --until keeps the task out of
 # captain_actionable until due, tasks-axi's own date-gate expiry keeps the task
 # answerable, and Bearings renders the wait as a dated gate.
@@ -1734,6 +1786,7 @@ test_default_keyed_answer_releases_in_flight_work
 test_default_keyed_answer_finishes_an_interrupted_close
 test_stale_reply_after_rehold_leaves_the_new_gate_intact
 test_stale_reply_with_a_changed_close_mode_is_refused
+test_keyed_answer_completes_a_call_row_left_in_flight_by_cleanup
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner

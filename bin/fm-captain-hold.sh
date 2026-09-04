@@ -71,13 +71,16 @@
 # close: `done` completes the task, `release` lifts the hold so held work
 # resumes, and an absent or empty mode retries whatever close a recorded
 # delivery of this same answer already began, or on a first delivery releases
-# a task currently In flight while completing a decision-only card; anything
-# else is skipped. A key that names no task, a task that is not held for the
-# captain, or a task already closed is reported as `skipped:` and feeds
-# nothing. A replayed delivery whose answer digest and requested close mode
-# both match the newest record is reported `closed:` and is a no-op, unless
-# the row has since been re-held for a later gate: that stale duplicate is
-# skipped rather than spent on the new gate, which keeps its hold and needs
+# a task currently In flight while completing a decision-only card. A staged
+# `state/<id>.backlog-close` record proves that row's own work already
+# finished and only its cleanup was interrupted, so it completes on the
+# captain's answer rather than releasing even while it reads In flight.
+# Anything else is skipped. A key that names no task, a task that is not held
+# for the captain, or a task already closed is reported as `skipped:` and
+# feeds nothing. A replayed delivery whose answer digest and requested close
+# mode both match the newest record is reported `closed:` and is a no-op,
+# unless the row has since been re-held for a later gate: that stale duplicate
+# is skipped rather than spent on the new gate, which keeps its hold and needs
 # decision text of its own. A mode mismatch is skipped. The command exits
 # nonzero when any key was skipped. `--source` is provenance text recorded in
 # the durable decision, never a behavior switch: this command has no
@@ -828,6 +831,16 @@ sanitize_field() {  # <text>
   printf '%s' "$1" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177' | cut -c1-512
 }
 
+# Durable evidence that a row's own work already finished and only its cleanup
+# was interrupted: teardown stages this record before any destructive step, so
+# while it exists the row reads In flight without any work an answer could
+# resume. A dangling link counts - the staging is what matters, not the target.
+pending_close_marker_exists() {  # <task-id>
+  local marker
+  marker=$(fm_backlog_close_marker_path "$STATE" "$1") || return 1
+  [ -e "$marker" ] || [ -L "$marker" ]
+}
+
 command_answers() {
   local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
   local recorded_digest recorded_mode recorded_match occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
@@ -912,11 +925,13 @@ command_answers() {
     # No card-declared mode, so the intake picks the close. A record of this
     # same answer already fixed it, so an interrupted close is retried as
     # whatever it started as; only a first delivery reads it off the state,
-    # where work still in flight is released rather than completed.
+    # where work still in flight is released rather than completed - unless a
+    # pending close record proves that row's own work already finished, which
+    # leaves the captain's call to complete on his answer.
     if [ -z "${mode:-}" ]; then
       if [ "$recorded_match" = 1 ]; then
         [ "$recorded_mode" != released ] || release_flag=--release
-      elif [ "$state" = in_flight ]; then
+      elif [ "$state" = in_flight ] && ! pending_close_marker_exists "$id"; then
         release_flag=--release
       fi
     fi
