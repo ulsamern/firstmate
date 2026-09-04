@@ -759,6 +759,63 @@ SH
   pass "an unstamped gate carrying two records is derived from its records, not a count"
 }
 
+# One gate can settle carrying several records. A later exact replay of any of
+# them is that gate's own answer replayed, so the intake reports it closed
+# rather than telling the channel the task could not be closed.
+test_replay_of_a_non_newest_record_on_a_settled_gate_is_idempotent() {
+  local home out rc records
+  home=$(make_home keyed-settled-replay)
+  tasks_in "$home" add sample-settled-pair "Decide the settled sample pair" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the settled-replay fixture"
+  run_captain "$home" hold sample-settled-pair --reason "captain decision pending" >/dev/null \
+    || fail "could not hold the settled-replay fixture"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  done|unhold)
+    if [ "${2:-}" = "${TASKS_AXI_FAIL_CLOSE_ID:-}" ]; then
+      printf 'error: backlog write interrupted\n' >&2
+      exit 70
+    fi
+    ;;
+esac
+exec "${REAL_TASKS_AXI:?}" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  set +e
+  printf 'sample-settled-pair\tship it in May\tDecide the settled sample pair\tdone\n' \
+    | PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+      TASKS_AXI_FAIL_CLOSE_ID=sample-settled-pair FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" answers \
+      --source "chat channel fixture" >/dev/null 2>&1
+  set -e
+  rm -f "$home/fakebin/tasks-axi"
+  # A second delivery of the same words through another channel settles the
+  # gate, leaving the chat delivery's record below the newest one.
+  printf 'sample-settled-pair\tship it in May\tDecide the settled sample pair\tdone\n' \
+    | run_captain "$home" answers --source "board card fixture" >/dev/null \
+    || fail "the second delivery did not settle the gate"
+  records=$(tasks_in "$home" show sample-settled-pair --full \
+    | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 2 ] || fail "the fixture did not leave two records on one settled gate ($records)"
+
+  set +e
+  out=$(printf 'sample-settled-pair\tship it in May\tDecide the settled sample pair\n' \
+    | run_captain "$home" answers --source "chat channel fixture" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "replaying a non-newest record of a settled gate reported a close failure: $out"
+  assert_contains "$out" "closed: sample-settled-pair" \
+    "the replay of a settled gate's own answer was not reported as closed"
+  records=$(tasks_in "$home" show sample-settled-pair --full \
+    | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 2 ] || fail "the idempotent replay changed the durable record ($records)"
+  pass "a replay of any record on a settled gate is idempotent"
+}
+
 # The stamp says which gate this script last placed, never whether its close
 # landed. Once an occurrence has settled, a gate re-placed with `tasks-axi hold`
 # directly is a NEW one, so the previous gate's answer is a stale echo that must
@@ -1394,6 +1451,39 @@ EOF
     "$channel" "the unstamped legacy answer resolved a different occurrence than its hold opened"
   assert_no_grep 'captain-hold-legacy-call-2' "$channel" \
     "the unstamped legacy answer published an occurrence its hold never opened"
+
+  # A settled gate that carries two records, with its stamp pruned: the replay
+  # must resolve the occurrence the parent actually saw opened, not a count.
+  run_captain "$mate" hold pair-call --title "Choose the paired release" \
+    --reason "paired choice pending" --repo sample >/dev/null || fail "paired hold failed"
+  printf 'ship the pair\n' > "$decision"
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ "${2:-}" = "${TASKS_AXI_FAIL_CLOSE_ID:-}" ]; then
+  printf 'error: backlog write interrupted\n' >&2
+  exit 70
+fi
+exec "${REAL_TASKS_AXI:?}" "$@"
+SH
+  chmod +x "$fakebin/tasks-axi"
+  set +e
+  PATH="$fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" TASKS_AXI_FAIL_CLOSE_ID=pair-call \
+    FM_HOME="$mate" FM_STATE_OVERRIDE="$mate/state" FM_DATA_OVERRIDE="$mate/data" \
+    FM_CONFIG_OVERRIDE="$mate/config" "$ROOT/bin/fm-captain-hold.sh" answer pair-call \
+    --decision-file "$decision" >/dev/null 2>&1
+  set -e
+  rm -f "$fakebin/tasks-axi"
+  printf 'pair-call\tship the pair again\t\n' \
+    | run_captain "$mate" answers --source "pair fixture" >/dev/null \
+    || fail "the second paired answer did not settle the gate"
+  rm -f "$mate/state/captain-hold-occurrence/pair-call.occurrence"
+  printf 'pair-call\tship the pair again\t\n' \
+    | run_captain "$mate" answers --source "pair fixture" >/dev/null \
+    || fail "the paired replay was refused"
+  assert_no_grep 'captain-hold-pair-call-2' "$channel" \
+    "the replay resolved an occurrence the parent channel never saw opened"
+  [ "$(grep -c 'resolved \[key=captain-hold-pair-call-1\]' "$channel")" = 1 ] \
+    || fail "the paired replay disturbed its own resolution: $(cat "$channel")"
 
   run_captain "$parent" hold main-call --title "Choose the main release" \
     --reason "main choice pending" --repo sample >/dev/null || fail "main hold failed"
@@ -2215,6 +2305,7 @@ test_directly_held_gate_survives_a_repeat_hold_after_an_interrupted_close
 test_legacy_unstamped_row_keeps_its_interrupted_close_answerable
 test_two_records_on_one_gate_stay_retryable
 test_unstamped_multi_record_gate_stays_retryable
+test_replay_of_a_non_newest_record_on_a_settled_gate_is_idempotent
 test_direct_regate_after_a_settled_close_refuses_the_stale_echo
 test_modeless_record_retry_falls_through_to_the_state_default
 test_stale_reply_after_rehold_leaves_the_new_gate_intact

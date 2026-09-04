@@ -416,6 +416,15 @@ resolution_record_count() {  # <task-body>
     | grep -Ec '^Resolution recorded by fm-(captain|decision)-hold\.$' || true
 }
 
+# Whether any record in the body names the gate it answered. A body whose
+# records all predate that line proves nothing about its gates, so the
+# occurrence a new record would name there stays unwritten.
+body_states_hold_occurrence() {  # <task-body>
+  local body
+  body=$(decode_shown_value "$1") || return 1
+  printf '%s\n' "$body" | grep -q '^Hold occurrence: '
+}
+
 # Which gate an unstamped row has open, read off its own records rather than
 # counted: the newest record names the gate it answered, and a gate that
 # accumulated several records still names one. Only a body whose records all
@@ -715,7 +724,7 @@ close_answered() {  # <task-id> <release-0-or-1>
 }
 
 command_answer() {
-  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode occurrence open_occurrence matched_occurrence matched_mode matched gate settled hold_record
+  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode occurrence open_occurrence matched_occurrence matched_mode matched gate record_gate settled hold_record
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -750,6 +759,7 @@ command_answer() {
       [ "$release" = 0 ] \
         || fail "task $id records this answer with mode ${recorded_mode:-unknown}; --release cannot reopen a closed task"
       gate=$(hold_occurrence_stamp "$id")
+      [ -n "$gate" ] || gate=$(newest_record_occurrence "$body")
       [ -n "$gate" ] || gate=$((occurrence - 1))
       if [ "$recorded_mode" = repaired ]; then
         publish_parent_hold "$id" "$gate" resolved "answered (repaired)"
@@ -832,7 +842,11 @@ command_answer() {
       printf '%s: %s\n' "$outcome" "$id"
       return 0
     fi
-    write_resolution_record "$id" "$outcome" "$body" "$open_occurrence"
+    record_gate=$open_occurrence
+    if [ -z "$record_gate" ] && body_states_hold_occurrence "$body"; then
+      record_gate=$gate
+    fi
+    write_resolution_record "$id" "$outcome" "$body" "$record_gate"
     close_answered "$id" "$release"
     show=$(task_show "$id") || fail "task $id disappeared after closing"
     body_has_resolution_record "$(show_field "$show" body)" \
@@ -851,6 +865,7 @@ command_answer() {
     [ "$recorded_mode" = released ] && [ "$release" = 1 ] \
       || fail "task $id records this answer with mode ${recorded_mode:-unknown}; replay requires matching --release"
     gate=$(hold_occurrence_stamp "$id")
+    [ -n "$gate" ] || gate=$(newest_record_occurrence "$body")
     [ -n "$gate" ] || gate=$((occurrence - 1))
     publish_parent_hold "$id" "$gate" resolved released
     printf 'released: %s\n' "$id"
@@ -962,7 +977,7 @@ pending_close_marker_exists() {  # <task-id>
 
 command_answers() {
   local origin='' source='' row rest key answer label mode id show state hold_kind body digest legacy_digest legacy_key
-  local recorded_digest recorded_mode recorded_match matched matched_mode occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
+  local recorded_match matched matched_occurrence matched_mode replay_gate occurrence tmp err closed=0 skipped=0 reason release_flag tab=$'\t'
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --source) shift; source=${1:-} ;;
@@ -1032,15 +1047,6 @@ command_answers() {
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)
     body=$(show_field "$show" body)
-    recorded_digest=$(recorded_decision_digest "$body" || true)
-    recorded_mode=$(recorded_resolution_mode "$body" || true)
-    recorded_match=0
-    if body_has_resolution_record "$body" \
-      && { [ "$recorded_digest" = "$digest" ] \
-        || { case "$body" in *"Resolution recorded by fm-decision-hold."*) true ;; *) false ;; esac \
-          && [ -n "$legacy_digest" ] && [ "$recorded_digest" = "$legacy_digest" ]; }; }; then
-      recorded_match=1
-    fi
     # No card-declared mode, so the intake picks the close. Any record of this
     # same answer that states one already fixed it, so an interrupted close is
     # retried as whatever it started as - read off that record rather than the
@@ -1051,11 +1057,24 @@ command_answers() {
     # already finished, which leaves the captain's call to complete on his
     # answer.
     matched=$(recorded_digest_occurrence "$body" "$digest")
-    if [ -z "$matched" ] && [ -n "$legacy_digest" ]; then
+    if [ -z "$matched" ] && [ -n "$legacy_digest" ] \
+      && case "$body" in *"Resolution recorded by fm-decision-hold."*) true ;; *) false ;; esac; then
       matched=$(recorded_digest_occurrence "$body" "$legacy_digest")
     fi
+    matched_occurrence=${matched%% *}
     matched_mode=''
     case "$matched" in *' '*) matched_mode=${matched#* } ;; esac
+    # An exact replay is idempotent while the record it matches names the gate
+    # the row has open or last settled - any of that gate's records, not only
+    # the newest, which is how `answer` matches. A record naming an earlier
+    # gate stays a stale echo rather than a replay.
+    replay_gate=$(hold_occurrence_stamp "$id")
+    [ -n "$replay_gate" ] || replay_gate=$(newest_record_occurrence "$body")
+    recorded_match=0
+    if [ -n "$matched" ] \
+      && { [ -z "$replay_gate" ] || [ "$matched_occurrence" = "$replay_gate" ]; }; then
+      recorded_match=1
+    fi
     if [ -z "${mode:-}" ]; then
       if [ -n "$matched_mode" ]; then
         [ "$matched_mode" != released ] || release_flag=--release
@@ -1064,12 +1083,12 @@ command_answers() {
       fi
     fi
     if [ "$recorded_match" = 1 ]; then
-      if { [ -z "$release_flag" ] && [ "$state" = "done" ] && [ "$recorded_mode" != released ]; } \
+      if { [ -z "$release_flag" ] && [ "$state" = "done" ] && [ "$matched_mode" != released ]; } \
         || { [ "$release_flag" = --release ] && [ "$state" != "done" ] \
-          && [ "$hold_kind" != captain ] && [ "$recorded_mode" = released ]; }; then
-        occurrence=$(hold_occurrence_stamp "$id")
+          && [ "$hold_kind" != captain ] && [ "$matched_mode" = released ]; }; then
+        occurrence=$replay_gate
         [ -n "$occurrence" ] || occurrence=$(resolution_record_count "$body")
-        case "$recorded_mode" in
+        case "$matched_mode" in
           repaired) publish_parent_hold "$id" "$occurrence" resolved "answered (repaired)" ;;
           released) publish_parent_hold "$id" "$occurrence" resolved released ;;
           *) publish_parent_hold "$id" "$occurrence" resolved answered ;;
