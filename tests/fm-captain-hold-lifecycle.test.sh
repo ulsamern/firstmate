@@ -732,6 +732,45 @@ test_direct_regate_after_a_settled_close_refuses_the_stale_echo() {
   pass "a settled occurrence makes a direct re-gate refuse the previous gate's echo"
 }
 
+# A record predating the `Resolution mode:` line states no close mode, so it
+# fixes nothing: the delivery that matches it must fall through to the same
+# state-derived default a first delivery gets, rather than completing gated
+# work whose own work never ran.
+test_modeless_record_retry_falls_through_to_the_state_default() {
+  local home show out text digest
+  home=$(make_home keyed-modeless-record)
+  tasks_in "$home" add sample-modeless-work "Ship the modeless sample work" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the modeless-record fixture"
+  run_captain "$home" hold sample-modeless-work --reason "captain go needed" >/dev/null \
+    || fail "could not hold the modeless-record fixture"
+  # The decision text the intake composes for this exact delivery, recorded in
+  # the pre-`Resolution mode:` block shape.
+  text=$(printf 'Captain answered this call through %s.\nTask: %s\nAnswer: %s\nAnswer as shown to the captain: %s' \
+    "three-field channel fixture" "sample-modeless-work" "go" "Ship the modeless sample work")
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$text" | shasum -a 256 | awk '{print $1}')
+  else
+    digest=$(printf '%s' "$text" | sha256sum | awk '{print $1}')
+  fi
+  printf 'Resolution recorded by fm-captain-hold.\nDecision digest: %s\n\nCaptain decision:\n%s\n' \
+    "$digest" "$text" > "$home/modeless-body.txt"
+  tasks_in "$home" update sample-modeless-work --body-file "$home/modeless-body.txt" --archive-body >/dev/null \
+    || fail "could not install the modeless resolution record"
+
+  out=$(printf 'sample-modeless-work\tgo\tShip the modeless sample work\n' \
+    | run_captain "$home" answers --source "three-field channel fixture") \
+    || fail "the three-field delivery matching a modeless record was refused"
+  assert_contains "$out" "closed: sample-modeless-work" \
+    "the delivery matching a modeless record was not applied"
+  show=$(tasks_in "$home" show sample-modeless-work --full)
+  assert_contains "$show" "state: in_flight" \
+    "a modeless record completed gated work instead of releasing it"
+  assert_contains "$show" "held: no" \
+    "the delivery matching a modeless record did not lift the gate"
+  pass "a modeless record falls through to the state-derived default"
+}
+
 # A re-hold opens a NEW captain call on the same row. A channel that replays
 # the previous occurrence's answer verbatim must not have it spent on the new
 # gate: nothing closes, the new hold stands with its single record, and the
@@ -2081,6 +2120,7 @@ test_directly_held_gate_survives_a_repeat_hold_after_an_interrupted_close
 test_legacy_unstamped_row_keeps_its_interrupted_close_answerable
 test_two_records_on_one_gate_stay_retryable
 test_direct_regate_after_a_settled_close_refuses_the_stale_echo
+test_modeless_record_retry_falls_through_to_the_state_default
 test_stale_reply_after_rehold_leaves_the_new_gate_intact
 test_stale_reply_with_a_changed_close_mode_is_refused
 test_keyed_answer_completes_a_call_row_left_in_flight_by_cleanup

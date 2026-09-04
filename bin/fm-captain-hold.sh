@@ -510,40 +510,30 @@ hold_occurrence_path() { printf '%s/%s.occurrence\n' "$HOLD_OCCURRENCE_DIR" "$1"
 # occurrence without guessing, which keeps rows carrying records from before
 # this record existed on the older, permissive behaviour; a corrupted record is
 # a hard error rather than a silent "unknown".
-read_hold_occurrence() {  # <task-id>
-  local path value schema
+# The second value is the newest occurrence whose close actually landed. The
+# stamp alone cannot say so - a gate re-placed with `tasks-axi hold` directly
+# leaves the same stamp above a settled record - so the close writes it back
+# and both commands read it to tell a still-open gate from one already spent.
+# It is empty on records written before the field existed, which leaves them on
+# the older behaviour.
+read_hold_record() {  # <task-id>; prints "<occurrence> <settled>"
+  local path record schema occurrence settled
   path=$(hold_occurrence_path "$1")
   [ -e "$path" ] || return 0
   [ -f "$path" ] && [ ! -L "$path" ] || fail "captain hold occurrence record is unsafe: $path"
-  schema=$(sed -n 's/^schema=//p' "$path" | head -1)
+  record=$(cat "$path") || fail "cannot read the captain hold occurrence record: $path"
+  schema=$(printf '%s\n' "$record" | sed -n 's/^schema=//p' | head -1)
   [ "$schema" = "$HOLD_OCCURRENCE_SCHEMA" ] \
     || fail "captain hold occurrence record has an incompatible schema: $path"
-  value=$(sed -n 's/^occurrence=//p' "$path" | head -1)
-  case "$value" in
+  occurrence=$(printf '%s\n' "$record" | sed -n 's/^occurrence=//p' | head -1)
+  case "$occurrence" in
     ''|*[!0-9]*) fail "captain hold occurrence record has an invalid occurrence: $path" ;;
   esac
-  printf '%s\n' "$value"
-}
-
-
-# The newest occurrence whose close actually landed. The stamp alone cannot say
-# so - a gate re-placed with `tasks-axi hold` directly leaves the same stamp
-# above a settled record - so the close writes this back and both commands read
-# it to tell a still-open gate from one already spent. Empty on records written
-# before the field existed, which leaves them on the older behaviour.
-read_hold_settled() {  # <task-id>
-  local path value schema
-  path=$(hold_occurrence_path "$1")
-  [ -e "$path" ] || return 0
-  [ -f "$path" ] && [ ! -L "$path" ] || fail "captain hold occurrence record is unsafe: $path"
-  schema=$(sed -n 's/^schema=//p' "$path" | head -1)
-  [ "$schema" = "$HOLD_OCCURRENCE_SCHEMA" ] \
-    || fail "captain hold occurrence record has an incompatible schema: $path"
-  value=$(sed -n 's/^settled=//p' "$path" | head -1)
-  case "$value" in
-    ''|*[!0-9]*) return 0 ;;
+  settled=$(printf '%s\n' "$record" | sed -n 's/^settled=//p' | head -1)
+  case "$settled" in
+    *[!0-9]*) settled='' ;;
   esac
-  printf '%s\n' "$value"
+  printf '%s %s\n' "$occurrence" "$settled"
 }
 
 write_hold_occurrence() {  # <task-id> <occurrence> [<settled-occurrence>]
@@ -563,7 +553,7 @@ write_hold_occurrence() {  # <task-id> <occurrence> [<settled-occurrence>]
 }
 
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind occurrence prior_hold_kind='' records stamp settled
+  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind occurrence prior_hold_kind='' records stamp settled hold_record
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -639,8 +629,10 @@ command_hold() {
   # close cannot have landed (a landed close leaves the row done or unheld), so
   # the open gate is that record's own occurrence, and it is left unstamped on
   # the permissive path rather than stamped from a count that cannot prove it.
-  stamp=$(read_hold_occurrence "$id")
-  settled=$(read_hold_settled "$id")
+  hold_record=$(read_hold_record "$id")
+  stamp=${hold_record%% *}
+  settled=''
+  case "$hold_record" in *' '*) settled=${hold_record#* } ;; esac
   if [ -n "$stamp" ]; then
     if [ "$prior_hold_kind" = captain ] && [ "$settled" != "$stamp" ]; then
       occurrence=$stamp
@@ -693,7 +685,7 @@ close_answered() {  # <task-id> <release-0-or-1>
 }
 
 command_answer() {
-  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode occurrence open_occurrence matched_occurrence matched_mode matched gate settled
+  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode occurrence open_occurrence matched_occurrence matched_mode matched gate settled hold_record
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -765,8 +757,10 @@ command_answer() {
     matched_occurrence=${matched%% *}
     matched_mode=''
     case "$matched" in *' '*) matched_mode=${matched#* } ;; esac
-    open_occurrence=$(read_hold_occurrence "$id")
-    settled=$(read_hold_settled "$id")
+    hold_record=$(read_hold_record "$id")
+    open_occurrence=${hold_record%% *}
+    settled=''
+    case "$hold_record" in *' '*) settled=${hold_record#* } ;; esac
     # A gate placed with `tasks-axi hold ... --kind captain` rather than
     # through this script leaves the stamp saying whatever this script last
     # placed. Answering a row that carries no record yet fixes its occurrence
@@ -789,10 +783,8 @@ command_answer() {
     fi
     if [ -n "$open_occurrence" ]; then
       gate=$open_occurrence
-    elif [ "$((occurrence - 1))" -gt 0 ]; then
-      gate=$((occurrence - 1))
     else
-      gate=$occurrence
+      gate=$((occurrence - 1))
     fi
     if [ -n "$matched_occurrence" ] && [ "$matched_occurrence" = "$gate" ]; then
       case "$matched_mode" in
@@ -1013,10 +1005,11 @@ command_answers() {
       recorded_match=1
     fi
     # No card-declared mode, so the intake picks the close. Any record of this
-    # same answer already fixed it, so an interrupted close is retried as
-    # whatever it started as - read off that record rather than the row's
-    # newest, which `answer` matches the same way; only a first delivery reads
-    # it off the state, where work still in flight is released rather than
+    # same answer that states one already fixed it, so an interrupted close is
+    # retried as whatever it started as - read off that record rather than the
+    # row's newest, which `answer` matches the same way. A record predating the
+    # mode line states none and fixes nothing, so it falls through with a first
+    # delivery to the state, where work still in flight is released rather than
     # completed - unless a pending close record proves that row's own work
     # already finished, which leaves the captain's call to complete on his
     # answer.
@@ -1027,7 +1020,7 @@ command_answers() {
     matched_mode=''
     case "$matched" in *' '*) matched_mode=${matched#* } ;; esac
     if [ -z "${mode:-}" ]; then
-      if [ -n "$matched" ]; then
+      if [ -n "$matched_mode" ]; then
         [ "$matched_mode" != released ] || release_flag=--release
       elif [ "$state" = in_flight ] && ! pending_close_marker_exists "$id"; then
         release_flag=--release
