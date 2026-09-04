@@ -463,6 +463,60 @@ SH
   pass "a three-field retry finishes an interrupted close instead of releasing it"
 }
 
+# `hold` is idempotent per task id, and an interrupted close has landed nothing:
+# repeating the hold over that state must keep the gate it already opened, so
+# the retry that finishes the close still recognises its own occurrence.
+test_repeat_hold_over_an_interrupted_close_keeps_its_occurrence() {
+  local home show out rc records
+  home=$(make_home keyed-interrupted-rehold)
+  tasks_in "$home" add sample-rehold-call "Decide the sample rollout again" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the repeat-hold fixture"
+  run_captain "$home" hold sample-rehold-call --reason "captain decision pending" >/dev/null \
+    || fail "could not hold the repeat-hold fixture"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = done ] && [ "${2:-}" = "${TASKS_AXI_FAIL_DONE_ID:-}" ]; then
+  printf 'error: backlog write interrupted\n' >&2
+  exit 70
+fi
+exec "${REAL_TASKS_AXI:?}" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  set +e
+  printf 'sample-rehold-call\tship it in November\tDecide the sample rollout again\tdone\n' \
+    | PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+      TASKS_AXI_FAIL_DONE_ID=sample-rehold-call FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" answers \
+      --source "three-field channel fixture" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the interrupted close reported success"
+  rm -f "$home/fakebin/tasks-axi"
+  show=$(tasks_in "$home" show sample-rehold-call --full)
+  assert_contains "$show" "hold_kind: captain" "the interrupted close dropped the captain hold"
+  assert_contains "$show" "Resolution mode: answered" \
+    "the interrupted close did not record the answered mode"
+
+  run_captain "$home" hold sample-rehold-call --reason "captain decision pending" >/dev/null \
+    || fail "the documented idempotent repeat hold was refused"
+
+  out=$(printf 'sample-rehold-call\tship it in November\tDecide the sample rollout again\n' \
+    | run_captain "$home" answers --source "three-field channel fixture") \
+    || fail "a repeat hold wedged the interrupted close against its own retry"
+  assert_contains "$out" "closed: sample-rehold-call" \
+    "the retry after a repeat hold did not report the finished close"
+  show=$(tasks_in "$home" show sample-rehold-call --full)
+  assert_contains "$show" "state: done" \
+    "the retry after a repeat hold did not finish the interrupted close"
+  assert_contains "$show" "Resolution mode: answered" \
+    "the retry after a repeat hold rewrote the recorded close mode"
+  records=$(printf '%s' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 1 ] || fail "the retry after a repeat hold fabricated a second record ($records)"
+  pass "a repeat hold over an interrupted close keeps the occurrence its retry names"
+}
+
 # A re-hold opens a NEW captain call on the same row. A channel that replays
 # the previous occurrence's answer verbatim must not have it spent on the new
 # gate: nothing closes, the new hold stands with its single record, and the
@@ -1784,6 +1838,7 @@ test_answer_records_and_closes
 test_release_frees_held_work
 test_default_keyed_answer_releases_in_flight_work
 test_default_keyed_answer_finishes_an_interrupted_close
+test_repeat_hold_over_an_interrupted_close_keeps_its_occurrence
 test_stale_reply_after_rehold_leaves_the_new_gate_intact
 test_stale_reply_with_a_changed_close_mode_is_refused
 test_keyed_answer_completes_a_call_row_left_in_flight_by_cleanup

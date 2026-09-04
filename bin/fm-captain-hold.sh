@@ -527,7 +527,7 @@ write_hold_occurrence() {  # <task-id> <occurrence>
 }
 
 command_hold() {
-  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind occurrence
+  local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind occurrence prior_hold_kind=''
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -557,6 +557,7 @@ command_hold() {
   require_tasks_axi
   if show=$(task_show "$id"); then
     state=$(show_field "$show" state)
+    prior_hold_kind=$(show_field_value "$show" hold_kind)
     [ "$state" != "done" ] \
       || fail "task $id is already closed; a new captain call needs its own task"
     if [ -n "$title" ]; then
@@ -592,8 +593,17 @@ command_hold() {
   show=$(task_show "$id") || fail "task $id disappeared while holding it"
   hold_kind=$(show_field_value "$show" hold_kind)
   [ "$hold_kind" = captain ] || fail "task $id did not retain its captain hold"
-  occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
-  write_hold_occurrence "$id" "$occurrence"
+  # Only a landed close mints a new occurrence. A row that was ALREADY
+  # captain-held has not closed anything since its stamp - a repeat hold, or a
+  # deferral over an interrupted close whose record is written but whose close
+  # never ran - so it keeps the occurrence it already opened rather than
+  # counting that record as a gate that finished.
+  occurrence=''
+  [ "$prior_hold_kind" != captain ] || occurrence=$(read_hold_occurrence "$id")
+  if [ -z "$occurrence" ]; then
+    occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
+    write_hold_occurrence "$id" "$occurrence"
+  fi
   publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
   printf '%s\n' "$id"
 }
