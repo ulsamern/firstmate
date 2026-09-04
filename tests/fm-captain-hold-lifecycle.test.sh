@@ -531,6 +531,49 @@ test_stale_reply_after_rehold_leaves_the_new_gate_intact() {
   pass "a stale reply after a re-hold is skipped whether it repeats the newest record or an older one"
 }
 
+# The close mode a delivery derives is not part of its identity. A card-declared
+# `release` answer replayed later from a three-field channel derives `done`
+# instead, and must still be refused rather than completing gated work whose
+# own work never ran.
+test_stale_reply_with_a_changed_close_mode_is_refused() {
+  local home show out rc records
+  home=$(make_home keyed-stale-mode-shift)
+  tasks_in "$home" add sample-gated-work "Apply the gated sample option" \
+    --kind ship --repo sample >/dev/null \
+    || fail "could not create the gated work fixture"
+  run_captain "$home" hold sample-gated-work --reason "captain go needed for gate one" >/dev/null \
+    || fail "could not place the first captain gate"
+  out=$(printf 'sample-gated-work\tgo\tApply the gated sample option\trelease\n' \
+    | run_captain "$home" answers --source "board card fixture") \
+    || fail "the first card-declared release was not accepted"
+  assert_contains "$out" "closed: sample-gated-work" "the first release card was not applied"
+
+  run_captain "$home" hold sample-gated-work --reason "captain go needed for gate two" >/dev/null \
+    || fail "could not place the second captain gate"
+  printf 'sample-gated-work\tproceed\tApply the gated sample option\trelease\n' \
+    | run_captain "$home" answers --source "board card fixture" >/dev/null \
+    || fail "the second card-declared release was not accepted"
+  run_captain "$home" hold sample-gated-work --reason "captain go needed for gate three" >/dev/null \
+    || fail "could not place the third captain gate"
+
+  set +e
+  out=$(printf 'sample-gated-work\tgo\tApply the gated sample option\n' \
+    | run_captain "$home" answers --source "board card fixture" 2>/dev/null)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a stale reply deriving a different close mode reported success"
+  assert_contains "$out" "skipped: sample-gated-work" \
+    "the stale reply deriving a different close mode was not skipped"
+  show=$(tasks_in "$home" show sample-gated-work --full)
+  assert_contains "$show" "state: queued" \
+    "a stale reply completed gated work whose own work never ran"
+  assert_contains "$show" "held: yes" "a stale reply lifted the third captain gate"
+  assert_contains "$show" "hold_kind: captain" "a stale reply dropped the third captain hold"
+  records=$(printf '%s' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 2 ] || fail "a stale reply wrote another resolution record ($records)"
+  pass "a stale reply is refused even when its close mode no longer matches the record"
+}
+
 # Deferral is a date, not a live card: hold --until keeps the task out of
 # captain_actionable until due, tasks-axi's own date-gate expiry keeps the task
 # answerable, and Bearings renders the wait as a dated gate.
@@ -1690,6 +1733,7 @@ test_release_frees_held_work
 test_default_keyed_answer_releases_in_flight_work
 test_default_keyed_answer_finishes_an_interrupted_close
 test_stale_reply_after_rehold_leaves_the_new_gate_intact
+test_stale_reply_with_a_changed_close_mode_is_refused
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner

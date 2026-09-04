@@ -410,20 +410,19 @@ resolution_record_count() {  # <task-body>
 # Which occurrence recorded a given answer, derived positionally rather than
 # from any stored index: records are prepended, so the first record in the
 # decoded body is the newest and carries the highest occurrence. Prints the
-# newest occurrence whose record carries <digest> under a close mode
-# compatible with <mode>, and nothing when no record carries it. A record
-# predating `Resolution mode:` states no mode, so it is compatible with either.
-recorded_digest_occurrence() {  # <task-body> <digest> <mode>
+# newest occurrence whose record carries <digest>, and nothing when no record
+# carries it. The close mode is deliberately not part of this question: the
+# same delivery answered under a different mode is still that delivery.
+recorded_digest_occurrence() {  # <task-body> <digest>
   local body
   body=$(decode_shown_value "$1") || return 1
-  printf '%s\n' "$body" | awk -v want="$2" -v mode="$3" '
+  printf '%s\n' "$body" | awk -v want="$2" '
     /^Resolution recorded by fm-(captain|decision)-hold\.$/ { n += 1; head = 1; next }
     head && index($0, "Decision digest: ") == 1 { d[n] = substr($0, 18); next }
-    head && index($0, "Resolution mode: ") == 1 { m[n] = substr($0, 18); next }
     head && $0 == "Captain decision:" { head = 0; next }
     END {
       for (i = 1; i <= n; i++) {
-        if (d[i] == want && (m[i] == "" || m[i] == mode)) { print n - i + 1; exit }
+        if (d[i] == want) { print n - i + 1; exit }
       }
     }
   '
@@ -628,7 +627,7 @@ close_answered() {  # <task-id> <release-0-or-1>
 }
 
 command_answer() {
-  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode occurrence open_occurrence stale_occurrence
+  local id=${1:-} decision_file='' release=0 show state hold_kind body outcome recorded_mode occurrence open_occurrence matched_occurrence
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -688,16 +687,22 @@ command_answer() {
 
   if [ "$hold_kind" = captain ]; then
     # Actively the captain's item (a date-expired hold keeps its annotations
-    # and stays answerable). A matching record means an interrupted close to
-    # finish; a different digest is a NEW answer on a re-held task and gets
-    # its own record on top. Either way the close mode is the caller's flag,
-    # checked against an interrupted close's recorded mode so a retry cannot
-    # silently flip a release into a close.
-    if body_has_resolution_record "$body" \
-      && [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ]; then
+    # and stays answerable). One question decides it: which occurrence, if any,
+    # already recorded this exact answer. The open one means an interrupted
+    # close to finish; any earlier one means a stale echo of that gate's
+    # delivery, refused rather than spent on this gate whatever close mode
+    # either carries; none means a NEW answer on a re-held task, which gets its
+    # own record on top. The close mode stays the caller's flag, checked
+    # against an interrupted close's recorded mode so a retry cannot silently
+    # flip a release into a close.
+    matched_occurrence=$(recorded_digest_occurrence "$body" "$DECISION_DIGEST")
+    if [ -n "$matched_occurrence" ]; then
       open_occurrence=$(read_hold_occurrence "$id")
-      [ -z "$open_occurrence" ] || [ "$open_occurrence" = "$((occurrence - 1))" ] \
-        || fail "task $id already recorded this answer for captain hold occurrence $((occurrence - 1)); occurrence $open_occurrence is open and needs its own answer"
+      if [ -n "$open_occurrence" ] && [ "$open_occurrence" != "$matched_occurrence" ]; then
+        fail "task $id already recorded this answer for captain hold occurrence $matched_occurrence; occurrence $open_occurrence is open and needs its own answer"
+      fi
+    fi
+    if [ "$matched_occurrence" = "$((occurrence - 1))" ]; then
       recorded_mode=$(recorded_resolution_mode "$body" || true)
       case "$recorded_mode" in
         released) [ "$release" = 1 ] || fail "task $id records this answer as a release; retry with --release" ;;
@@ -707,13 +712,6 @@ command_answer() {
       publish_parent_hold "$id" $((occurrence - 1)) resolved "$outcome"
       printf '%s: %s\n' "$outcome" "$id"
       return 0
-    fi
-    stale_occurrence=$(recorded_digest_occurrence "$body" "$DECISION_DIGEST" "$outcome")
-    if [ -n "$stale_occurrence" ]; then
-      open_occurrence=$(read_hold_occurrence "$id")
-      if [ -n "$open_occurrence" ] && [ "$open_occurrence" != "$stale_occurrence" ]; then
-        fail "task $id already recorded this answer for captain hold occurrence $stale_occurrence; occurrence $open_occurrence is open and needs its own answer"
-      fi
     fi
     write_resolution_record "$id" "$outcome" "$body"
     close_answered "$id" "$release"
