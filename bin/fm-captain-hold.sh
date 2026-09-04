@@ -787,9 +787,8 @@ command_answers() {
     label=$(sanitize_field "${label:-}")
     release_flag=''
     case "${mode:-}" in
-      done) : ;;
+      ''|done) : ;;
       release) release_flag=--release ;;
-      '') : ;;
       *)
         printf 'skipped: %s (unknown close mode %s)\n' "$key" "$(sanitize_field "$mode")"
         skipped=$((skipped + 1))
@@ -820,7 +819,7 @@ command_answers() {
     state=$(show_field "$show" state)
     hold_kind=$(show_field_value "$show" hold_kind)
     body=$(show_field "$show" body)
-    if [ -z "$release_flag" ] && [ -z "${mode:-}" ] && [ "$state" = in_flight ]; then
+    if [ -z "${mode:-}" ] && [ "$state" = in_flight ]; then
       release_flag=--release
     fi
     recorded_digest=$(recorded_decision_digest "$body" || true)
