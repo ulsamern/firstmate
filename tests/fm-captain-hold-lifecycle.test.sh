@@ -508,7 +508,27 @@ test_stale_reply_after_rehold_leaves_the_new_gate_intact() {
   assert_contains "$show" "Answer: go for gate two" "the second gate's answer was not recorded"
   records=$(printf '%s' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
   [ "$records" = 2 ] || fail "the second gate's answer did not get its own record ($records)"
-  pass "a stale reply after a re-hold is skipped and the new captain gate stands"
+
+  # An intervening gate answered in different words pushes the first answer
+  # below the newest record; repeating it must still be refused.
+  run_captain "$home" hold sample-gated-widget --reason "captain go needed for gate three" >/dev/null \
+    || fail "could not place the third captain gate"
+  set +e
+  out=$(printf 'sample-gated-widget\tgo\tShip the gated sample widget\n' \
+    | run_captain "$home" answers --source "three-field channel fixture" 2>/dev/null)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a reply repeating an older occurrence's answer reported success"
+  assert_contains "$out" "skipped: sample-gated-widget" \
+    "the reply repeating an older-than-newest record was not skipped"
+  show=$(tasks_in "$home" show sample-gated-widget --full)
+  assert_contains "$show" "held: yes" "an older stale reply lifted the third captain gate"
+  assert_contains "$show" "hold_kind: captain" "an older stale reply dropped the third captain hold"
+  assert_contains "$show" "hold_reason: captain go needed for gate three" \
+    "an older stale reply replaced the third gate's reason"
+  records=$(printf '%s' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 2 ] || fail "an older stale reply wrote another resolution record ($records)"
+  pass "a stale reply after a re-hold is skipped whether it repeats the newest record or an older one"
 }
 
 # Deferral is a date, not a live card: hold --until keeps the task out of
