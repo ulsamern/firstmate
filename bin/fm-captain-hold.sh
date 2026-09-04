@@ -80,13 +80,15 @@
 # through to that same state rule rather than supplying one. A staged
 # `state/<id>.backlog-close` record proves that row's own work already
 # finished and only its cleanup was interrupted, so it completes on the
-# captain's answer rather than releasing even while it reads In flight.
-# Anything else is skipped. A key that names no task, a task that is not held
-# for the captain, or a task already closed is reported as `skipped:` and
-# feeds nothing. A replayed delivery whose answer digest and requested close
-# mode match a record naming the gate the row has open or last settled - any
-# of that gate's records, not only the newest - is reported `closed:` and is a
-# no-op, unless the row has since been re-held for a later gate: that stale
+# captain's answer rather than releasing even while it reads In flight - but
+# only while it still names the dispatch now under way, since a record a later
+# dispatch superseded proves nothing about live work. Anything else is
+# skipped. A key that names no task, a task that is not held for the captain,
+# or a task already closed is reported as `skipped:` and feeds nothing. A
+# replayed delivery whose answer digest and requested close mode match a
+# record naming the gate the row has open or last settled - any of that gate's
+# records, not only the newest - is reported `closed:` and is a no-op, unless
+# the row has since been re-held for a later gate: that stale
 # duplicate is skipped rather than spent on the new gate, which keeps its hold
 # and needs decision text of its own. A mode mismatch is skipped. The command
 # exits nonzero when any key was skipped. `--source` is provenance text
@@ -205,6 +207,23 @@ publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
     0|1) ;;
     *) printf 'actionable: task %s is held for the captain in this home but that did not reach the parent channel (rc=%s)\n' "$id" "$rc" >&2 ;;
   esac
+}
+
+# Whether the parent channel already carries this occurrence's resolution. The
+# channel appends each line once, so a key re-used across two gates makes the
+# second gate's resolution a duplicate that is dropped, leaving an answered
+# call reading as open forever - an occurrence must therefore name one gate.
+# A landed close published this line and an interrupted one never did, so it is
+# the evidence a row carrying no stamp has left about which of its gates is
+# spent. No parent channel means no such line and nothing to collide with.
+parent_hold_occurrence_settled() {  # <task-id> <occurrence>
+  local destination
+  destination=$(fm_parent_channel_destination "$FM_HOME" "$STATE" 2>/dev/null) || return 1
+  [ -f "$destination" ] && [ ! -L "$destination" ] || return 1
+  awk -v want="resolved [key=captain-hold-$1-$2]:" '
+    index($0, want) == 1 { found = 1; exit }
+    END { exit(found ? 0 : 1) }
+  ' "$destination"
 }
 
 CAPTAIN_META_LOCK=
@@ -666,9 +685,12 @@ command_hold() {
   # active hold over it is a NEW gate however it was placed, including with
   # `tasks-axi hold` directly, so the stamp advances. A still-captain-held row
   # that carries records but no stamp predates this record entirely: its newest
-  # close cannot have landed (a landed close leaves the row done or unheld), so
-  # the open gate is that record's own occurrence, and it is left unstamped on
-  # the permissive path rather than stamped from a count that cannot prove it.
+  # close cannot have landed (a landed close leaves the row done or unheld,
+  # unless a gate re-placed directly stood the row back up), so the open gate is
+  # that record's own occurrence, and it is left unstamped on the permissive
+  # path rather than stamped from a count that cannot prove it - unless the
+  # parent channel already carries that occurrence's resolution, which proves
+  # its close did land and makes this a new gate that mints a successor.
   hold_record=$(read_hold_record "$id")
   stamp=${hold_record%% *}
   settled=''
@@ -683,9 +705,15 @@ command_hold() {
   else
     shown_body=$(show_field "$show" body)
     records=$(resolution_record_count "$shown_body")
+    occurrence=''
     if [ "$prior_hold_kind" = captain ] && [ "$records" -gt 0 ]; then
       occurrence=$(newest_record_occurrence "$shown_body")
-    else
+      if [ -n "$occurrence" ] && parent_hold_occurrence_settled "$id" "$occurrence"; then
+        occurrence=$((occurrence + 1))
+        write_hold_occurrence "$id" "$occurrence" "$settled"
+      fi
+    fi
+    if [ -z "$occurrence" ]; then
       occurrence=$((records + 1))
       write_hold_occurrence "$id" "$occurrence" "$settled"
     fi
@@ -753,17 +781,24 @@ command_answer() {
   if [ "$state" = "done" ]; then
     if body_has_resolution_record "$body"; then
       # An exact compatible retry is an idempotent no-op; drift is rejected.
-      [ "$(recorded_decision_digest "$body" || true)" = "$DECISION_DIGEST" ] \
-        || fail "captain-held task $id records a different captain decision"
-      recorded_mode=$(recorded_resolution_mode "$body" || true)
-      [ "$recorded_mode" != released ] \
-        || fail "task $id records this answer with mode released; a closed task cannot replay that release"
-      [ "$release" = 0 ] \
-        || fail "task $id records this answer with mode ${recorded_mode:-unknown}; --release cannot reopen a closed task"
+      # The gate this row last settled can carry more than one record, and any
+      # of them replays it - the same rule `answers` and the captain branch
+      # apply - so the mode checked is the matched record's own rather than the
+      # row's newest. A record naming an earlier gate is drift, not a replay.
       gate=$(hold_occurrence_stamp "$id")
       [ -n "$gate" ] || gate=$(newest_record_occurrence "$body")
       [ -n "$gate" ] || gate=$((occurrence - 1))
-      if [ "$recorded_mode" = repaired ]; then
+      matched=$(recorded_digest_occurrence "$body" "$DECISION_DIGEST")
+      matched_occurrence=${matched%% *}
+      matched_mode=''
+      case "$matched" in *' '*) matched_mode=${matched#* } ;; esac
+      { [ -n "$matched" ] && [ "$matched_occurrence" = "$gate" ]; } \
+        || fail "captain-held task $id records a different captain decision"
+      [ "$matched_mode" != released ] \
+        || fail "task $id records this answer with mode released; a closed task cannot replay that release"
+      [ "$release" = 0 ] \
+        || fail "task $id records this answer with mode ${matched_mode:-unknown}; --release cannot reopen a closed task"
+      if [ "$matched_mode" = repaired ]; then
         publish_parent_hold "$id" "$gate" resolved "answered (repaired)"
       else
         publish_parent_hold "$id" "$gate" resolved answered
@@ -970,11 +1005,22 @@ sanitize_field() {  # <text>
 # Durable evidence that a row's own work already finished and only its cleanup
 # was interrupted: teardown stages this record before any destructive step, so
 # while it exists the row reads In flight without any work an answer could
-# resume. A dangling link counts - the staging is what matters, not the target.
+# resume. A record left behind by an earlier dispatch says nothing about the
+# work running now, so it is held to the same staleness test the session-start
+# replay applies: a task record naming a different spawn generation supersedes
+# it, and an unreadable one proves nothing. Only when no task record stands
+# over it - the shape teardown leaves once it has removed one - does the
+# staging alone speak, and a dangling link counts there.
 pending_close_marker_exists() {  # <task-id>
-  local marker
+  local marker meta marker_gen
   marker=$(fm_backlog_close_marker_path "$STATE" "$1") || return 1
-  [ -e "$marker" ] || [ -L "$marker" ]
+  [ -e "$marker" ] || [ -L "$marker" ] || return 1
+  meta="$STATE/$1.meta"
+  { [ -e "$meta" ] || [ -L "$meta" ]; } || return 0
+  fm_backlog_meta_spawn_gen "$meta" "$STATE" || return 1
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  marker_gen=$(sed -n 's/^spawn_gen=//p' "$marker" | head -1) || return 1
+  [ -n "$marker_gen" ] && [ "$marker_gen" = "$FM_BACKLOG_META_SPAWN_GEN" ]
 }
 
 command_answers() {

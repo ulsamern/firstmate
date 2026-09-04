@@ -816,6 +816,70 @@ SH
   pass "a replay of any record on a settled gate is idempotent"
 }
 
+# `answer <id> --decision-file <path>` is the escape hatch the lifecycle doc and
+# the skill point operators at, so it must read a settled gate the way the
+# intake does: any record naming that gate carries its answer, not only the
+# newest one, and the mode checked is that record's own.
+test_direct_answer_replays_a_non_newest_record_of_a_settled_gate() {
+  local home decision out rc records
+  home=$(make_home keyed-direct-settled-replay)
+  decision="$home/older-delivery.txt"
+  tasks_in "$home" add sample-direct-pair "Decide the direct sample pair" \
+    --kind ship --repo sample --start >/dev/null \
+    || fail "could not create the direct settled-replay fixture"
+  run_captain "$home" hold sample-direct-pair --reason "captain decision pending" >/dev/null \
+    || fail "could not hold the direct settled-replay fixture"
+  cat > "$home/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  done|unhold)
+    if [ "${2:-}" = "${TASKS_AXI_FAIL_CLOSE_ID:-}" ]; then
+      printf 'error: backlog write interrupted\n' >&2
+      exit 70
+    fi
+    ;;
+esac
+exec "${REAL_TASKS_AXI:?}" "$@"
+SH
+  chmod +x "$home/fakebin/tasks-axi"
+  set +e
+  printf 'sample-direct-pair\tship it in June\tDecide the direct sample pair\tdone\n' \
+    | PATH="$home/fakebin:$PATH" REAL_TASKS_AXI="$TASKS_AXI_BIN" \
+      TASKS_AXI_FAIL_CLOSE_ID=sample-direct-pair FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+      FM_CONFIG_OVERRIDE="$home/config" "$ROOT/bin/fm-captain-hold.sh" answers \
+      --source "chat channel fixture" >/dev/null 2>&1
+  set -e
+  rm -f "$home/fakebin/tasks-axi"
+  printf 'sample-direct-pair\tship it in June\tDecide the direct sample pair\tdone\n' \
+    | run_captain "$home" answers --source "board card fixture" >/dev/null \
+    || fail "the second delivery did not settle the direct-replay gate"
+  records=$(tasks_in "$home" show sample-direct-pair --full \
+    | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 2 ] || fail "the fixture did not leave two records on one settled gate ($records)"
+  # The older record sits at the bottom of the body, so the decision text after
+  # the LAST `Captain decision:` line is the chat delivery's own - taken from
+  # the durable record rather than reproduced by hand.
+  tasks_in "$home" show sample-direct-pair --full | sed -n 's/^  body: //p' | jq -r . \
+    | awk '/^Captain decision:$/ { start = NR } { line[NR] = $0 }
+           END { for (i = start + 1; i <= NR; i++) print line[i] }' > "$decision"
+  grep -Fq 'chat channel fixture' "$decision" \
+    || fail "the fixture did not recover the older delivery's own decision text"
+
+  set +e
+  out=$(run_captain "$home" answer sample-direct-pair --decision-file "$decision" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "the direct replay of a settled gate's older record was refused: $out"
+  assert_contains "$out" "answered: sample-direct-pair" \
+    "the direct replay of a settled gate's own answer was not reported as answered"
+  records=$(tasks_in "$home" show sample-direct-pair --full \
+    | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 2 ] || fail "the direct replay changed the durable record ($records)"
+  pass "a direct answer replays any record of the gate a closed row settled"
+}
+
 # The stamp says which gate this script last placed, never whether its close
 # landed. Once an occurrence has settled, a gate re-placed with `tasks-axi hold`
 # directly is a NEW one, so the previous gate's answer is a stale echo that must
@@ -1084,6 +1148,65 @@ SH
     "a keyed answer recorded the wrong close mode on the captain's own call row"
   assert_contains "$show" "Answer: go with option A" "the keyed answer lost the captain's words"
   pass "a keyed answer completes a captain call row an interrupted cleanup left In flight"
+}
+
+# The pending close record is evidence about ONE dispatch of a row. A record an
+# earlier dispatch staged and never retired says nothing about the work running
+# now, so a keyed answer over a re-dispatched row must release that live work
+# rather than complete it - the same staleness test the session-start replay of
+# that record applies.
+test_superseded_pending_close_record_does_not_complete_live_work() {
+  local home id wt show out rc
+  home=$(make_home keyed-superseded-close-record)
+  id=sample-superseded-close-call
+  wt="$home/projects/$id"
+  mkdir -p "$home/data/$id" "$wt" "$home/projects/sample"
+  tasks_in "$home" add "$id" "Investigate the superseded sample cleanup" --kind scout \
+    --repo sample --start >/dev/null || fail "could not create the superseded-record fixture"
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$home/projects/sample" \
+    "harness=codex" "kind=scout" "mode=scout" "spawn_gen=fixture-$id"
+  printf 'done: report complete\n' > "$home/state/$id.status"
+  printf '# Superseded cleanup\n\nThe captain call remains open.\n' > "$home/data/$id/report.md"
+  run_captain "$home" hold "$id" --reason "captain must choose after the cleanup" >/dev/null \
+    || fail "could not hold the superseded-record fixture"
+  run_captain "$home" complete "$id" "$id" >/dev/null \
+    || fail "completion gate failed for the superseded-record fixture"
+  cat > "$home/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$home/fakebin/treehouse"
+  set +e
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" "$TEARDOWN" "$id" --force >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the superseded-record fixture completed instead of failing part-way"
+  assert_present "$home/state/$id.backlog-close" \
+    "the interrupted cleanup did not stage the pending close record"
+  # The row is dispatched again beneath that abandoned record: a new task
+  # record, a new spawn generation, and real work under way once more.
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" "worktree=$wt" "project=$home/projects/sample" \
+    "harness=codex" "kind=scout" "mode=scout" "spawn_gen=redispatch-$id"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "state: in_flight" "the fixture did not leave the row In flight"
+  assert_contains "$show" "hold_kind: captain" "the fixture dropped the captain hold"
+
+  out=$(printf '%s\tgo with option A\tInvestigate the superseded sample cleanup\n' "$id" \
+    | run_captain "$home" answers --source "three-field channel fixture") \
+    || fail "the three-field answer was refused over a superseded pending close record"
+  assert_contains "$out" "closed: $id" "the answer over a superseded record was not applied"
+  show=$(tasks_in "$home" show "$id" --full)
+  assert_contains "$show" "state: in_flight" \
+    "a superseded pending close record completed work that was running again"
+  assert_contains "$show" "held: no" "the keyed answer did not release the re-dispatched work"
+  assert_contains "$show" "Resolution mode: released" \
+    "the keyed answer recorded the wrong close mode over a superseded record"
+  assert_contains "$show" "Answer: go with option A" "the keyed answer lost the captain's words"
+  pass "a superseded pending close record does not complete re-dispatched work"
 }
 
 # Deferral is a date, not a live card: hold --until keeps the task out of
@@ -1431,7 +1554,10 @@ EOF
 
   # A row left unstamped from before the occurrence record existed: hold and
   # answer must still name the same gate, or the parent keeps an open decision
-  # for a task that is fully answered.
+  # for a task that is fully answered. The gate they name must also be one the
+  # channel has not already resolved - the channel appends each line once, so a
+  # new gate re-using a settled occurrence would have its own resolution
+  # dropped as a duplicate and read as open forever.
   run_captain "$mate" hold legacy-call --title "Choose the legacy release" \
     --reason "legacy choice pending" --repo sample >/dev/null || fail "legacy hold failed"
   printf 'go ahead\n' > "$decision"
@@ -1442,14 +1568,16 @@ EOF
   rm -f "$mate/state/captain-hold-occurrence/legacy-call.occurrence"
   run_captain "$mate" hold legacy-call --reason "legacy second choice" >/dev/null \
     || fail "repeat hold on the unstamped legacy row failed"
-  assert_grep 'needs-decision [key=captain-hold-legacy-call-1]: captain hold legacy-call: legacy second choice' \
-    "$channel" "the unstamped legacy row did not reopen its own occurrence"
+  assert_grep 'needs-decision [key=captain-hold-legacy-call-2]: captain hold legacy-call: legacy second choice' \
+    "$channel" "the unstamped legacy row re-used an occurrence the channel had already resolved"
   printf 'ship the legacy release\n' > "$decision"
   run_captain "$mate" answer legacy-call --decision-file "$decision" --release >/dev/null \
     || fail "legacy second answer failed"
-  assert_grep 'resolved [key=captain-hold-legacy-call-1]: captain hold legacy-call: released' \
+  assert_grep 'resolved [key=captain-hold-legacy-call-2]: captain hold legacy-call: released' \
     "$channel" "the unstamped legacy answer resolved a different occurrence than its hold opened"
-  assert_no_grep 'captain-hold-legacy-call-2' "$channel" \
+  [ "$(grep -c 'captain-hold-legacy-call-1' "$channel")" = 2 ] \
+    || fail "the second legacy gate disturbed the first gate's pair: $(cat "$channel")"
+  assert_no_grep 'captain-hold-legacy-call-3' "$channel" \
     "the unstamped legacy answer published an occurrence its hold never opened"
 
   # A settled gate that carries two records, with its stamp pruned: the replay
@@ -2306,11 +2434,13 @@ test_legacy_unstamped_row_keeps_its_interrupted_close_answerable
 test_two_records_on_one_gate_stay_retryable
 test_unstamped_multi_record_gate_stays_retryable
 test_replay_of_a_non_newest_record_on_a_settled_gate_is_idempotent
+test_direct_answer_replays_a_non_newest_record_of_a_settled_gate
 test_direct_regate_after_a_settled_close_refuses_the_stale_echo
 test_modeless_record_retry_falls_through_to_the_state_default
 test_stale_reply_after_rehold_leaves_the_new_gate_intact
 test_stale_reply_with_a_changed_close_mode_is_refused
 test_keyed_answer_completes_a_call_row_left_in_flight_by_cleanup
+test_superseded_pending_close_record_does_not_complete_live_work
 test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner
