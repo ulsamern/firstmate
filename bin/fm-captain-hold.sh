@@ -173,8 +173,10 @@
 # an exact retry republishes the same line, which the channel deduplicates.
 # A row carrying records but no such state reads the occurrence off the newest
 # record's own `Hold occurrence:` line, and only records written before that
-# line existed fall back to a count. A main home has no channel and publishes
-# nothing.
+# line existed fall back to a count; when the channel already carries that
+# occurrence's resolution, the gate standing over it is a later one the row
+# cannot name, so its answer is refused rather than spent on the settled gate.
+# A main home has no channel and publishes nothing.
 # The hold or answer is already durable in the backlog, so a channel that
 # cannot be written is reported as `actionable:` on stderr rather than undoing
 # the record; bin/fm-inactive-reconcile.sh's diagnostics name a broken binding.
@@ -837,7 +839,17 @@ command_answer() {
     if [ -n "$open_occurrence" ]; then
       gate=$open_occurrence
     else
+      # Reading the gate off the newest record holds only while that record's
+      # own close never landed. A channel already carrying that occurrence's
+      # resolution proves it did, so the hold standing now is a later gate this
+      # row cannot name: spending the reply on the settled occurrence would
+      # have the channel drop its resolution as a duplicate and leave the open
+      # call reading as open forever. It is refused as the suspected stale
+      # duplicate it is, leaving the newer gate holding for its own answer.
       gate=$(newest_record_occurrence "$body")
+      if [ -n "$gate" ] && parent_hold_occurrence_settled "$id" "$gate"; then
+        fail "task $id already settled captain hold occurrence $gate and carries no record of the gate held now, which needs its own answer; hold it again with 'fm-captain-hold.sh hold $id' to stamp that gate, then answer it"
+      fi
       [ -n "$gate" ] || gate=$occurrence
     fi
     if [ -n "$matched_occurrence" ] && [ "$matched_occurrence" = "$gate" ]; then

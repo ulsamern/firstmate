@@ -1604,7 +1604,7 @@ EOF
 # closes a distinct parent decision and a retry never duplicates a line. A main
 # home publishes nothing anywhere.
 test_secondmate_home_publishes_holds_and_answers() {
-  local parent mate fakebin channel decision out
+  local parent mate fakebin channel decision out rc show records
   parent=$(make_home parent-channel)
   mate="$TMP_ROOT/channel-mate-home"
   mkdir -p "$mate/data" "$mate/state" "$mate/config" "$mate/projects"
@@ -1710,6 +1710,53 @@ EOF
     || fail "the second legacy gate disturbed the first gate's pair: $(cat "$channel")"
   assert_no_grep 'captain-hold-legacy-call-3' "$channel" \
     "the unstamped legacy answer published an occurrence its hold never opened"
+
+  # The same legacy row answered straight from the pre-record re-hold, with no
+  # repair hold in between: it carries one record naming a gate the channel has
+  # already resolved, and no stamp. The gate standing now is a later one the
+  # row cannot name, so the reply is refused and the gate keeps its hold,
+  # rather than being spent on the settled occurrence whose resolution the
+  # channel would drop as a duplicate - leaving the open call reading as open
+  # forever. A hold then stamps that gate and it takes an answer of its own.
+  run_captain "$mate" hold upgrade-call --title "Choose the upgrade release" \
+    --reason "upgrade choice pending" --repo sample >/dev/null || fail "upgrade hold failed"
+  printf 'go ahead on the upgrade\n' > "$decision"
+  run_captain "$mate" answer upgrade-call --decision-file "$decision" --release >/dev/null \
+    || fail "upgrade release answer failed"
+  tasks_in "$mate" show upgrade-call --full | sed -n 's/^  body: //p' | jq -r . \
+    | grep -v '^Hold occurrence: ' > "$mate/upgrade-body.txt"
+  ! grep -q '^Hold occurrence: ' "$mate/upgrade-body.txt" \
+    || fail "the upgrade fixture kept the occurrence line it must predate"
+  tasks_in "$mate" update upgrade-call --body-file "$mate/upgrade-body.txt" \
+    --archive-body >/dev/null || fail "could not install the pre-occurrence upgrade record"
+  rm -f "$mate/state/captain-hold-occurrence/upgrade-call.occurrence"
+  tasks_in "$mate" hold upgrade-call --reason "upgrade second choice" --kind captain >/dev/null \
+    || fail "could not re-gate the upgrade row through tasks-axi directly"
+  set +e
+  out=$(printf 'upgrade-call\tship the upgrade\t\n' \
+    | run_captain "$mate" answers --source "upgrade fixture" 2>/dev/null)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "an answer over a settled unstamped gate reported success"
+  assert_contains "$out" "skipped: upgrade-call" \
+    "the answer over a settled unstamped gate was not skipped"
+  show=$(tasks_in "$mate" show upgrade-call --full)
+  assert_contains "$show" "held: yes" "the refused answer lifted the standing upgrade gate"
+  assert_contains "$show" "hold_kind: captain" "the refused answer dropped the standing upgrade hold"
+  records=$(printf '%s' "$show" | grep -o 'Resolution recorded by fm-captain-hold\.' | wc -l | tr -d ' ')
+  [ "$records" = 1 ] || fail "the refused answer wrote another resolution record ($records)"
+  [ "$(grep -c 'resolved \[key=captain-hold-upgrade-call-1\]' "$channel")" = 1 ] \
+    || fail "the refused answer disturbed the settled gate's resolution: $(cat "$channel")"
+  run_captain "$mate" hold upgrade-call --reason "upgrade second choice" >/dev/null \
+    || fail "the repair hold on the unstamped upgrade row failed"
+  assert_grep 'needs-decision [key=captain-hold-upgrade-call-2]: captain hold upgrade-call: upgrade second choice' \
+    "$channel" "the repair hold did not open the gate standing over the settled occurrence"
+  out=$(printf 'upgrade-call\tship the upgrade\t\n' \
+    | run_captain "$mate" answers --source "upgrade fixture") \
+    || fail "the stamped upgrade gate refused an answer of its own"
+  assert_contains "$out" "closed: upgrade-call" "the stamped upgrade gate's answer was not applied"
+  assert_grep 'resolved [key=captain-hold-upgrade-call-2]: captain hold upgrade-call: answered' \
+    "$channel" "the stamped upgrade gate's answer did not resolve its own occurrence"
 
   # A record written before the `Hold occurrence:` line existed: the close and
   # its own replay must derive the same gate, or the parent gains a resolution
