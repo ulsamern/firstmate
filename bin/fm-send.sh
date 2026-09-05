@@ -661,8 +661,9 @@ fm_send_close_resolved_keys() {  # <answer-text>
 
 # Feed the answered captain-held tasks to the ONE keyed-answer intake, as keyed
 # lines, exactly the way every other channel does. fm-send decides nothing here:
-# it does not build a decision record or choose a close path; the keys were
-# already resolved to task ids above, so the intake needs no legacy origin.
+# it does not build a decision record, and it does not choose whether the answer
+# releases the item or completes it; the keys were already resolved to task ids
+# above, so the intake needs no legacy origin.
 fm_send_feed_resolved_holds() {  # <answer-text>
   local note=$1 k lines=''
   [ -n "$RESOLVE_HOLD_KEYS" ] || return 0
@@ -672,7 +673,7 @@ fm_send_feed_resolved_holds() {  # <answer-text>
   done
   if ! printf '%s' "$lines" | "$SCRIPT_DIR/fm-captain-hold.sh" answers \
     --source "a firstmate answer sent to $RESOLVE_TASK_ID" >/dev/null 2>&1; then
-    echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-captain-hold.sh answer - do not resend the answer." >&2
+    echo "error: the answer was delivered to $T, but this captain-held task could not be resolved: ${RESOLVE_HOLD_KEYS}. Resolve it through the same intake, fm-captain-hold.sh answers, which owns that choice: a held item still in flight is released to continue, a decision-only card is completed, and an explicit mode overrides both - do not resend the answer." >&2
     return 1
   fi
 }
