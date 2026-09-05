@@ -847,10 +847,9 @@ command_answer() {
       # call reading as open forever. It is refused as the suspected stale
       # duplicate it is, leaving the newer gate holding for its own answer.
       gate=$(newest_record_occurrence "$body")
-      if [ -n "$gate" ] && parent_hold_occurrence_settled "$id" "$gate"; then
-        fail "task $id already settled captain hold occurrence $gate and carries no record of the gate held now, which needs its own answer; hold it again with 'fm-captain-hold.sh hold $id' to stamp that gate, then answer it"
+      if parent_hold_occurrence_settled "$id" "$gate"; then
+        fail "task $id already settled captain hold occurrence $gate and carries no record of the gate held now, which needs its own answer; hold it again with 'fm-captain-hold.sh hold $id --reason <reason>' to stamp that gate, then answer it"
       fi
-      [ -n "$gate" ] || gate=$occurrence
     fi
     if [ -n "$matched_occurrence" ] && [ "$matched_occurrence" = "$gate" ]; then
       case "$matched_mode" in
