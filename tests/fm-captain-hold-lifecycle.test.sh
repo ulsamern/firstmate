@@ -1725,8 +1725,8 @@ EOF
     || fail "upgrade release answer failed"
   tasks_in "$mate" show upgrade-call --full | sed -n 's/^  body: //p' | jq -r . \
     | grep -v '^Hold occurrence: ' > "$mate/upgrade-body.txt"
-  ! grep -q '^Hold occurrence: ' "$mate/upgrade-body.txt" \
-    || fail "the upgrade fixture kept the occurrence line it must predate"
+  grep -q '^Resolution recorded by fm-captain-hold\.$' "$mate/upgrade-body.txt" \
+    || fail "the upgrade fixture lost the record its gate must be read from"
   tasks_in "$mate" update upgrade-call --body-file "$mate/upgrade-body.txt" \
     --archive-body >/dev/null || fail "could not install the pre-occurrence upgrade record"
   rm -f "$mate/state/captain-hold-occurrence/upgrade-call.occurrence"

@@ -673,7 +673,7 @@ fm_send_feed_resolved_holds() {  # <answer-text>
   done
   if ! printf '%s' "$lines" | "$SCRIPT_DIR/fm-captain-hold.sh" answers \
     --source "a firstmate answer sent to $RESOLVE_TASK_ID" >/dev/null 2>&1; then
-    echo "error: the answer was delivered to $T, but this captain-held task could not be resolved: ${RESOLVE_HOLD_KEYS}. Resolve it through the same intake, fm-captain-hold.sh answers, which owns that choice: a held item still in flight is released to continue, a decision-only card is completed, and an explicit mode overrides both - do not resend the answer." >&2
+    echo "error: the answer was delivered to $T, but this captain-held task could not be resolved: ${RESOLVE_HOLD_KEYS}. Resolve it per task with: fm-captain-hold.sh answer <id> --decision-file <path>, adding --release when that item is still in flight and must resume rather than complete - do not resend the answer." >&2
     return 1
   fi
 }
