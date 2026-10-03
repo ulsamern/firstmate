@@ -1,0 +1,4 @@
+ok - watch-arm: handling successor delivers new inbox work after-ack without consuming or looping
+rc[after-ack]=0
+ok - watch-arm: handling successor delivers new inbox work before-ack without consuming or looping
+rc[before-ack]=0

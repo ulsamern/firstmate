@@ -1,0 +1,8 @@
+wait_for_exit: owned pid 941282 exceeded 100 polls; sending TERM
+ 941282  940533 S    bash /tmp/fm-basecheck.7qxv/bin/fm-watch-arm.sh --restart
+not ok - handling successor stranded the second inbox wake (after-ack)
+rc[after-ack]=1
+wait_for_exit: owned pid 946267 exceeded 100 polls; sending TERM
+ 946267  945108 S    bash /tmp/fm-basecheck.7qxv/bin/fm-watch-arm.sh --restart
+not ok - handling successor stranded the second inbox wake (before-ack)
+rc[before-ack]=1
