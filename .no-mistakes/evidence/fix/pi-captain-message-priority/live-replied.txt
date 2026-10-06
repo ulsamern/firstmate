@@ -1,0 +1,51 @@
+### case=replied  (real Pi 0.99.2, scripted faux provider, lab /tmp/fm-lab.l7TQJd)
+--- probe.log (model steps & events in order)
+{"event":"user_message_start","text":"PROBE_START_SUPERVISION"}
+{"event":"model_step","step":1,"fresh":[{"role":"system","text":""},{"role":"user","text":"PROBE_START_SUPERVISION"}]}
+{"event":"tool_start"}
+{"event":"routine_followup_queued"}
+{"event":"watcher_trigger_written"}
+{"event":"tool_completed","aborted":false}
+{"event":"model_step","step":2,"fresh":[{"role":"toolResult","text":"WORK_TOOL_COMPLETED"}]}
+{"event":"user_message_start","text":"ROUTINE_BACKGROUND_FOLLOWUP"}
+{"event":"model_step","step":3,"fresh":[{"role":"user","text":"ROUTINE_BACKGROUND_FOLLOWUP"}]}
+{"event":"user_message_start","text":"⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: check: inbox 1791015324-human\n\nRun bin/fm-wake-drain.sh first and han"}
+{"event":"model_step","step":4,"fresh":[{"role":"user","text":"⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: check: inbox 1791015324-human\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned."}]}
+--- arm.log
+arm=700820
+arm=701256
+--- inbox after run
+/tmp/fm-lab.l7TQJd/home/state/inbox:
+total 16
+drwxrwxr-x 3 nino nino 4096 Oct  6 10:55 .
+drwxrwxr-x 3 nino nino 4096 Oct  6 10:55 ..
+-rw-rw-r-- 1 nino nino   67 Oct  6 10:55 1791015324-human.note
+drwxrwxr-x 2 nino nino 4096 Oct  6 10:55 .replies
+
+/tmp/fm-lab.l7TQJd/home/state/inbox/.replies:
+total 12
+drwxrwxr-x 2 nino nino 4096 Oct  6 10:55 .
+drwxrwxr-x 3 nino nino 4096 Oct  6 10:55 ..
+-rw-rw-r-- 1 nino nino    9 Oct  6 10:55 1791015324-human
+--- tmux pane
+ ▀▀█  v0.99.2
+ █▀ █ escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more
+ Press ctrl+o to show full startup help and loaded resources.
+ Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
+[Extensions]
+  fm-primary-pi-watch.ts, probe.ts
+ Warning: fd not found. Offline mode enabled, skipping download.
+ Warning: tmux extended-keys is off. Modified Enter keys may not work. Add `set -g extended-keys on` to ~/.tmux.conf and restart tmux.
+ PROBE_START_SUPERVISION
+ work_tool
+ WORK_TOOL_COMPLETED
+ MODEL_STEP_2_DONE
+ ROUTINE_BACKGROUND_FOLLOWUP
+ MODEL_STEP_3_DONE
+ ⁣FIRSTMATE_OP: v1 watcher: FIRSTMATE WATCHER WAKE: check: inbox 1791015324-human
+ Run bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.
+ MODEL_STEP_4_DONE
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+/tmp/fm-lab.l7TQJd/project
+↑1.7k ↓18 R5.0k W1.8k CH94.0% 2.8%/66k (auto)                                                                                                                               scripted
