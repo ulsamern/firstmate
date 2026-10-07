@@ -1,0 +1,53 @@
+
+$ fm-inbox.sh note 'first klartext message'
+queued 1791415017-WLIdsL
+  first klartext message
+  firstmate will pick this up at its next check.
+
+$ predecessor arm output
+check: rearm-resurface
+
+$ fm-watch-arm.sh --handling-delivered 1128835.1791415017.a3VmSi --watcher-pid 1129715
+rc=0
+
+$ fm-wake-drain.sh  (handling turn presents first message)
+1791415017	1	check	inbox:1791415017-WLIdsL	check: captain inbox note 1791415017-WLIdsL - first klartext message
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 1128835.1791415017.a3VmSi
+
+$ after 3s with only inherited rows: successor alive (no loop)?
+successor 1129619 still waiting (quiet) - OK
+
+$ fm-wake-drain.sh --ack-through 1 --recovery-generation 1128835.1791415017.a3VmSi
+rc=0
+
+$ queue now:
+(end)
+
+$ fm-inbox.sh note 'second klartext message'
+queued 1791415023-yXGqLi
+  second klartext message
+  firstmate will pick this up at its next check.
+
+$ successor arm output
+FAIL: successor still silent
+
+$ queue still holds second message:
+1791415023	2	check	inbox:1791415023-yXGqLi	check: captain inbox note 1791415023-yXGqLi - second klartext message
+
+$ fm-inbox.sh ready
+{"schema":"fm-primary-ready.v1","home":"tmp/fm-lab.9HGdK8","observed_at":"2026-10-07T23:17:15Z","lock":{"state":"free","pid":null,"live_harness":false},"wake_consumer":{"state":"unknown","reason":"supervision-model-unknown-for-home","beacon_age_seconds":0},"posture":{"state":"present"},"can_receive":false}
+rc=0
+
+$ fm-wake-drain.sh (next turn)
+1791415023	2	check	inbox:1791415023-yXGqLi	check: captain inbox note 1791415023-yXGqLi - second klartext message
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 2 --recovery-generation 1132135.1791415023.BQ3Z8N
+
+$ fm-wake-drain.sh --ack-through 2 --recovery-generation 1132135.1791415023.BQ3Z8N
+rc=0
+
+$ after ack, next successor quiet?
+next successor 1137252 quiet - OK
+
+$ queue after ack:
+(empty)
+DRIVE-DONE

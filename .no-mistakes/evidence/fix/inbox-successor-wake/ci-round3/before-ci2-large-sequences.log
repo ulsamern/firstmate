@@ -1,0 +1,2 @@
+not ok - sequence 9223372036854775806 (intact counter) advanced to '9223372036854775808', not 9223372036854775807
+rc=1

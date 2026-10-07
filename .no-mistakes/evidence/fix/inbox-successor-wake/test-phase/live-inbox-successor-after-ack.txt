@@ -1,0 +1,55 @@
+
+$ fm-inbox.sh note 'first klartext message'
+queued 1791414966-ZiwP7w
+  first klartext message
+  firstmate will pick this up at its next check.
+
+$ predecessor arm output
+watcher: started pid=1108942 (beacon fresh)
+check: rearm-resurface
+
+$ fm-watch-arm.sh --handling-delivered 1108796.1791414966.dPqp3Z --watcher-pid 1109567
+rc=0
+
+$ fm-wake-drain.sh  (handling turn presents first message)
+1791414966	1	check	inbox:1791414966-ZiwP7w	check: captain inbox note 1791414966-ZiwP7w - first klartext message
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 1108796.1791414966.dPqp3Z
+
+$ after 3s with only inherited rows: successor alive (no loop)?
+successor 1109541 still waiting (quiet) - OK
+
+$ fm-wake-drain.sh --ack-through 1 --recovery-generation 1108796.1791414966.dPqp3Z
+rc=0
+
+$ queue now:
+(end)
+
+$ fm-inbox.sh note 'second klartext message'
+queued 1791414971-DhMhQI
+  second klartext message
+  firstmate will pick this up at its next check.
+
+$ successor arm output
+watcher: started pid=1109567 (beacon fresh) recovery-generation=1108796.1791414966.dPqp3Z
+check: rearm-resurface
+
+$ queue still holds second message:
+1791414971	2	check	inbox:1791414971-DhMhQI	check: captain inbox note 1791414971-DhMhQI - second klartext message
+
+$ fm-inbox.sh ready
+{"schema":"fm-primary-ready.v1","home":"tmp/fm-lab.pu0MBr","observed_at":"2026-10-07T23:16:12Z","lock":{"state":"free","pid":null,"live_harness":false},"wake_consumer":{"state":"unknown","reason":"supervision-model-unknown-for-home","beacon_age_seconds":0},"posture":{"state":"present"},"can_receive":false}
+rc=0
+
+$ fm-wake-drain.sh (next turn)
+1791414971	2	check	inbox:1791414971-DhMhQI	check: captain inbox note 1791414971-DhMhQI - second klartext message
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 2 --recovery-generation 1111221.1791414971.2mEj6i
+
+$ fm-wake-drain.sh --ack-through 2 --recovery-generation 1111221.1791414971.2mEj6i
+rc=0
+
+$ after ack, next successor quiet?
+next successor 1111718 quiet - OK
+
+$ queue after ack:
+(empty)
+DRIVE-DONE

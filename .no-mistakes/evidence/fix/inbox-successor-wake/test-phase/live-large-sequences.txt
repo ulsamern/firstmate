@@ -1,0 +1,27 @@
+### counter=2147483647
+$ cat .wake-queue
+2147483648	check	inbox:1791415054-iuMtJf
+$ rm .wake-queue.seq (counter lost); fm-inbox.sh note
+2147483648	check	inbox:1791415054-iuMtJf
+2147483649	check	inbox:1791415054-PDWDEr
+$ fm-wake-drain.sh
+2147483648	check	inbox:1791415054-iuMtJf
+2147483649	check	inbox:1791415054-PDWDEr
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 2147483649 --recovery-generation 1142346.1791415054.fBv0Fs
+$ fm-wake-drain.sh --ack-through 2147483649 --recovery-generation 1142346.1791415054.fBv0Fs
+rc=0 queue-bytes=0
+### counter=9007199254740991
+$ cat .wake-queue
+9007199254740992	check	inbox:1791415055-0ntabN
+$ rm .wake-queue.seq (counter lost); fm-inbox.sh note
+9007199254740992	check	inbox:1791415055-0ntabN
+9007199254740993	check	inbox:1791415055-vkSKfQ
+$ fm-wake-drain.sh
+9007199254740992	check	inbox:1791415055-0ntabN
+9007199254740993	check	inbox:1791415055-vkSKfQ
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 9007199254740992 --recovery-generation 1143057.1791415055.jM8e0O
+$ fm-wake-drain.sh --ack-through 9007199254740992 --recovery-generation 1143057.1791415055.jM8e0O
+rc=0 queue-bytes=0
+### counter=9223372036854775806
+$ cat .wake-queue
+9223372036854775807	check	inbox:1791415056-udIWCz

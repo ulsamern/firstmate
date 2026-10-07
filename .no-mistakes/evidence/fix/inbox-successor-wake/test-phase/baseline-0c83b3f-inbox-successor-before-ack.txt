@@ -1,0 +1,51 @@
+
+$ fm-inbox.sh note 'first klartext message'
+queued 1791414992-Vavfw4
+  first klartext message
+  firstmate will pick this up at its next check.
+
+$ predecessor arm output
+watcher: started pid=1118131 (beacon fresh)
+check: rearm-resurface
+
+$ fm-watch-arm.sh --handling-delivered 1118012.1791414992.enFneS --watcher-pid 1119276
+rc=0
+
+$ fm-wake-drain.sh  (handling turn presents first message)
+1791414992	1	check	inbox:1791414992-Vavfw4	check: captain inbox note 1791414992-Vavfw4 - first klartext message
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 1118012.1791414992.enFneS
+
+$ after 3s with only inherited rows: successor alive (no loop)?
+successor 1119236 still waiting (quiet) - OK
+
+$ fm-inbox.sh note 'second klartext message'
+queued 1791414998-cmpQwF
+  second klartext message
+  firstmate will pick this up at its next check.
+
+$ fm-wake-drain.sh --ack-through 1 --recovery-generation 1118012.1791414992.enFneS  (predecessor turn finishes, old ack)
+rc=0
+
+$ successor arm output
+FAIL: successor still silent
+
+$ queue still holds second message:
+1791414998	2	check	inbox:1791414998-cmpQwF	check: captain inbox note 1791414998-cmpQwF - second klartext message
+
+$ fm-inbox.sh ready
+{"schema":"fm-primary-ready.v1","home":"tmp/fm-lab.xrscbS","observed_at":"2026-10-07T23:16:50Z","lock":{"state":"free","pid":null,"live_harness":false},"wake_consumer":{"state":"unknown","reason":"supervision-model-unknown-for-home","beacon_age_seconds":0},"posture":{"state":"present"},"can_receive":false}
+rc=0
+
+$ fm-wake-drain.sh (next turn)
+1791414998	2	check	inbox:1791414998-cmpQwF	check: captain inbox note 1791414998-cmpQwF - second klartext message
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 2 --recovery-generation 1118012.1791414992.enFneS
+
+$ fm-wake-drain.sh --ack-through 2 --recovery-generation 1118012.1791414992.enFneS
+rc=0
+
+$ after ack, next successor quiet?
+next successor 1125295 quiet - OK
+
+$ queue after ack:
+(empty)
+DRIVE-DONE

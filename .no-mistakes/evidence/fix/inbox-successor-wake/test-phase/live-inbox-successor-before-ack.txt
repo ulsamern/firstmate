@@ -1,0 +1,52 @@
+
+$ fm-inbox.sh note 'first klartext message'
+queued 1791414952-HWehWG
+  first klartext message
+  firstmate will pick this up at its next check.
+
+$ predecessor arm output
+watcher: started pid=1100740 (beacon fresh)
+check: rearm-resurface
+
+$ fm-watch-arm.sh --handling-delivered 1100627.1791414952.SqGfgn --watcher-pid 1101792
+rc=0
+
+$ fm-wake-drain.sh  (handling turn presents first message)
+1791414952	1	check	inbox:1791414952-HWehWG	check: captain inbox note 1791414952-HWehWG - first klartext message
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 1100627.1791414952.SqGfgn
+
+$ after 3s with only inherited rows: successor alive (no loop)?
+successor 1101739 still waiting (quiet) - OK
+
+$ fm-inbox.sh note 'second klartext message'
+queued 1791414959-MKq2w7
+  second klartext message
+  firstmate will pick this up at its next check.
+
+$ fm-wake-drain.sh --ack-through 1 --recovery-generation 1100627.1791414952.SqGfgn  (predecessor turn finishes, old ack)
+rc=0
+
+$ successor arm output
+watcher: started pid=1101792 (beacon fresh) recovery-generation=1100627.1791414952.SqGfgn
+check: rearm-resurface
+
+$ queue still holds second message:
+1791414959	2	check	inbox:1791414959-MKq2w7	check: captain inbox note 1791414959-MKq2w7 - second klartext message
+
+$ fm-inbox.sh ready
+{"schema":"fm-primary-ready.v1","home":"tmp/fm-lab.PC4vHY","observed_at":"2026-10-07T23:16:00Z","lock":{"state":"free","pid":null,"live_harness":false},"wake_consumer":{"state":"unknown","reason":"supervision-model-unknown-for-home","beacon_age_seconds":0},"posture":{"state":"present"},"can_receive":false}
+rc=0
+
+$ fm-wake-drain.sh (next turn)
+1791414959	2	check	inbox:1791414959-MKq2w7	check: captain inbox note 1791414959-MKq2w7 - second klartext message
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 2 --recovery-generation 1100627.1791414952.SqGfgn
+
+$ fm-wake-drain.sh --ack-through 2 --recovery-generation 1100627.1791414952.SqGfgn
+rc=0
+
+$ after ack, next successor quiet?
+next successor 1107085 quiet - OK
+
+$ queue after ack:
+(empty)
+DRIVE-DONE

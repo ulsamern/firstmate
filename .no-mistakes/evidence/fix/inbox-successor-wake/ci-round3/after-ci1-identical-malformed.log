@@ -1,0 +1,2 @@
+ok - watch-arm: handling successor delivers identical new inbox work after-ack (malformed counter) without consuming or looping
+rc=0
