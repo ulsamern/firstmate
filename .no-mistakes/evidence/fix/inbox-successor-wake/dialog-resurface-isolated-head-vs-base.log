@@ -1,0 +1,6 @@
+run=1 side=head elapsed=112s load=7.35 ok - host: dialog a turn never completed with its report (a park boundary, a stopped turn, no report) reaches the next turn 
+run=1 side=base elapsed=136s load=7.52 ok - host: dialog a turn never completed with its report (a park boundary, a stopped turn, no report) reaches the next turn 
+run=2 side=head elapsed=127s load=8.02 ok - host: dialog a turn never completed with its report (a park boundary, a stopped turn, no report) reaches the next turn 
+run=2 side=base elapsed=152s load=6.71 ok - host: dialog a turn never completed with its report (a park boundary, a stopped turn, no report) reaches the next turn 
+run=3 side=head elapsed=115s load=5.70 ok - host: dialog a turn never completed with its report (a park boundary, a stopped turn, no report) reaches the next turn 
+run=3 side=base elapsed=136s load=5.99 ok - host: dialog a turn never completed with its report (a park boundary, a stopped turn, no report) reaches the next turn 

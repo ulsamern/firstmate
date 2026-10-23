@@ -1,0 +1,73 @@
+=== Scenario A: lost counter while an unacknowledged row is queued
+$ bin/fm-inbox.sh note first captain note
+queued 1792733215-jsaW8D
+  first captain note
+  firstmate will pick this up at its next check.
+[exit 0]
+$ bin/fm-wake-drain.sh
+1792733215	1	check	inbox:1792733215-jsaW8D	check: captain inbox note 1792733215-jsaW8D - first captain note
+[exit 0]
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 4055982.1792733215.PcpqFa
+--- .wake-queue:
+1792733215	1	check	inbox:1792733215-jsaW8D	check: captain inbox note 1792733215-jsaW8D - first captain note
+--- .wake-queue.seq: 1
+# simulate counter loss before the handling turn acknowledges
+$ bin/fm-inbox.sh note second captain note after counter loss
+queued 1792733216-KiNo6l
+  second captain note after counter loss
+  firstmate will pick this up at its next check.
+[exit 0]
+--- .wake-queue:
+1792733215	1	check	inbox:1792733215-jsaW8D	check: captain inbox note 1792733215-jsaW8D - first captain note
+1792733216	1	check	inbox:1792733216-KiNo6l	check: captain inbox note 1792733216-KiNo6l - second captain note after counter loss
+--- .wake-queue.seq: 1
+# the predecessor's outstanding acknowledgement must not consume the new note
+$ bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 4055982.1792733215.PcpqFa
+[exit 0]
+--- .wake-queue:
+--- .wake-queue.seq: 1
+=== Scenario B: malformed counter
+$ bin/fm-inbox.sh note third captain note after malformed counter
+queued 1792733216-nowT4t
+  third captain note after malformed counter
+  firstmate will pick this up at its next check.
+[exit 0]
+--- .wake-queue:
+1792733216	1	check	inbox:1792733216-nowT4t	check: captain inbox note 1792733216-nowT4t - third captain note after malformed counter
+--- .wake-queue.seq: 1
+$ bin/fm-wake-drain.sh
+1792733216	1	check	inbox:1792733216-nowT4t	check: captain inbox note 1792733216-nowT4t - third captain note after malformed counter
+[exit 0]
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 4056648.1792733216.DEeGDp
+$ bin/fm-wake-drain.sh --ack-through 1 --recovery-generation 4056648.1792733216.DEeGDp
+[exit 0]
+--- .wake-queue:
+--- .wake-queue.seq: 1
+=== Scenario C: large sequence (2^53-1 queued, 2^63-2 counter)
+$ bin/fm-inbox.sh note note after 2^53-1
+queued 1792733217-3wbf2U
+  note after 2^53-1
+  firstmate will pick this up at its next check.
+[exit 0]
+--- .wake-queue:
+1700000000	9007199254740991	check	inbox:big	check: big row
+1792733217	1	check	inbox:1792733217-3wbf2U	check: captain inbox note 1792733217-3wbf2U - note after 2^53-1
+--- .wake-queue.seq: 1
+$ bin/fm-wake-drain.sh
+1700000000	9007199254740991	check	inbox:big	check: big row
+1792733217	1	check	inbox:1792733217-3wbf2U	check: captain inbox note 1792733217-3wbf2U - note after 2^53-1
+[exit 0]
+WAKE_ACK_REQUIRED: after handling completes run bin/fm-wake-drain.sh --ack-through 9007199254740991 --recovery-generation 4057235.1792733217.auCH2e
+$ bin/fm-wake-drain.sh --ack-through 9007199254740991 --recovery-generation 4057235.1792733217.auCH2e
+[exit 0]
+--- .wake-queue:
+--- .wake-queue.seq: 1
+$ bin/fm-inbox.sh note note after 2^63-2
+queued 1792733218-ZNT7WW
+  note after 2^63-2
+  firstmate will pick this up at its next check.
+[exit 0]
+--- .wake-queue:
+1792733218	9223372036854775807	check	inbox:1792733218-ZNT7WW	check: captain inbox note 1792733218-ZNT7WW - note after 2^63-2
+--- .wake-queue.seq: 9223372036854775807
+lab removed: yes
